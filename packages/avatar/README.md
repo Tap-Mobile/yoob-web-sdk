@@ -1,13 +1,14 @@
 # @yoob/avatar
 
 Talking characters rendered in the browser with WebGPU. You give Yoob speech; it plays the audio and moves the face in
-sync, on the visitor's own GPU. Add a microphone and OpenAI Realtime or Gemini Live, and you have a live spoken
-conversation with barge-in.
+sync, on the visitor's own GPU. Add a microphone and Yoob voice, and you have a live spoken conversation with barge-in,
+with no provider key. You can also bring your own OpenAI Realtime, Gemini Live or LiveKit agent.
 
 - **Light.** About 20 KB gzipped to start. Rendering workers load when a character is created, and character files
   (37 MB) stream from `cdn.yoob.com` in verified chunks cached in the browser. On a good connection the character
   appears in about half a second, and a returning visitor is ready in about one.
-- **Private.** Audio and text go to your voice provider, not to Yoob. See [Network](#network).
+- **Private.** Faces render on the visitor's GPU. Conversation audio goes only to the voice service you choose. See
+  [Network](#network).
 
 Works in current desktop Chrome and Edge. Mobile browsers are not supported yet; `YoobAvatar.isSupported()` tells you
 before you load anything.
@@ -66,23 +67,80 @@ button.onclick = async () => {
 const heardMs = avatar.interrupt();        // stop now; returns what was heard
 ```
 
-## Talk with it: OpenAI Realtime
+## Talk with it: Yoob voice
+
+No provider key needed; minutes are billed through your Yoob workspace. Yoob hosts the voice (OpenAI Realtime) and
+tunes it for the characters: server turn detection, far-field noise reduction, captions and a 1.08 speaking speed.
 
 ```ts
 import { YoobConversation } from "@yoob/avatar";
 
 const conversation = new YoobConversation(avatar, {
-  getClientSecret: () => fetch("/openai-secret", { method: "POST" }).then((r) => r.json()).then((s) => s.value),
-  voice: "marin",
-  instructions: "You are Luna, a warm, curious companion.",
+  getVoiceSession: () => fetch("/yoob-voice", { method: "POST" }).then((r) => r.json()),
   greet: true,
   onUserTranscript: (text) => (userCaption.textContent = text),
   onAssistantTranscript: (text) => (lunaCaption.textContent = text),
   onState: (state) => console.log(state), // connecting → listening → thinking → speaking
+  onError: (error) => (status.textContent = error.message),
 });
 
 talkButton.onclick = () => conversation.start();   // asks for the microphone
 endButton.onclick = () => conversation.stop();
+```
+
+Your backend asks Yoob for a voice session with your API key and returns the response as is:
+
+```js
+// POST /yoob-voice on your server
+const response = await fetch("https://api2.yoob.com/api/v1/voice/sessions", {
+  method: "POST",
+  headers: { authorization: `Bearer ${process.env.YOOB_API_KEY}`, "content-type": "application/json" },
+  body: JSON.stringify({
+    voice: "marin",                                         // optional
+    instructions: "You are Luna, a warm, curious companion.", // optional, up to 8,000 characters
+    max_seconds: 900,                                       // optional, default 1800
+  }),
+});
+res.status(response.status).json(await response.json());
+// 201 { voice_session_id, voice_token, url, model, max_seconds, credits_per_minute, expires_at }
+```
+
+- **One session per conversation.** A voice session opens exactly one connection, and its token must be used within 5
+  minutes. `start()` calls `getVoiceSession` every time, so don't cache the response.
+- **Voice and instructions.** Set them on your backend: the page can't change them, and the prompt never reaches the
+  browser. `voice` is one of `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin` or
+  `cedar`. If the backend leaves them out, the conversation's `voice` and `instructions` options are used instead.
+- **Fixed settings.** Yoob sets the model, turn detection, noise reduction, transcription and speed, so those options
+  are ignored.
+- **Errors.** When the workspace is out of credit, the API answers `402 { "code": "quota_exceeded" }`, and `start()`
+  fails with a `YoobError` whose code is `out-of-credit`. A rejected API key becomes `unauthorized`. If the voice
+  service ends the call, `onError` receives a `voice-session` error with a message you can show the user.
+  `error.details.closeCode` holds the WebSocket close code:
+
+| Close code | Message |
+|---|---|
+| 4001, 4002, 4003 | The voice session was refused, had expired, or was already used. Start the conversation again. |
+| 4008 | This conversation reached its usage limit. |
+| 4009 | This conversation reached its time limit (`max_seconds`). |
+| 4010 | The conversation ended because it was idle for too long. |
+| 4029 | Voice has reached its usage limit for now (too many conversations at once, or the daily quota). Try again later. |
+| 1013 | Voice is busy right now. Try again in a moment. |
+| 1011 | The voice service disconnected. Start the conversation again. |
+
+`sendText(text)`, captions and barge-in work the same as with your own OpenAI account.
+
+## Talk with it: your own OpenAI account
+
+Pass `getClientSecret` instead of `getVoiceSession`, and OpenAI bills your account directly:
+
+```ts
+const conversation = new YoobConversation(avatar, {
+  getClientSecret: () => fetch("/openai-secret", { method: "POST" }).then((r) => r.json()).then((s) => s.value),
+  voice: "marin",
+  instructions: "You are Luna, a warm, curious companion.",
+  greet: true,
+  onState: (state) => console.log(state),
+});
 ```
 
 Your backend creates the client secret with
@@ -247,14 +305,17 @@ Using your own voice stack? Call `mic.start()` and read `mic.on("audio", pcm => 
 | `cdn.yoob.com` ONNX Runtime WebAssembly | First visit | Nothing |
 | `api2.yoob.com/api/v1/sessions/heartbeat` | Every 15 s while prepared | Session token |
 | `api2.yoob.com/api/v1/sessions/end` | `destroy()` or page close | Session token |
+| `wss://voice.yoob.com/v1/realtime` | Yoob voice conversations | Voice token, microphone audio, typed text |
 
-With `YoobConversation`, microphone audio goes directly from the browser to OpenAI, and with `YoobGeminiConversation`
-directly to Google. With `YoobLiveKitSession`, it goes to your LiveKit server, and the agent's audio comes back from it.
+With Yoob voice, microphone audio goes from the browser to `voice.yoob.com`, which relays it to OpenAI and meters the
+minutes. With your own OpenAI account, it goes directly from the browser to OpenAI, and with
+`YoobGeminiConversation` directly to Google. With `YoobLiveKitSession`, it goes to your LiveKit server, and the agent's audio comes back from it.
 
 ## Content Security Policy
 
-Allow `connect-src https://cdn.yoob.com https://api2.yoob.com` (plus `wss://api.openai.com` or
-`wss://generativelanguage.googleapis.com` for conversations, or your LiveKit server for LiveKit agents),
+Allow `connect-src https://cdn.yoob.com https://api2.yoob.com` (plus `wss://voice.yoob.com` for Yoob voice,
+`wss://api.openai.com` or `wss://generativelanguage.googleapis.com` for your own provider, or your LiveKit server for
+LiveKit agents),
 `script-src 'self' 'wasm-unsafe-eval'`, `worker-src 'self'`, and `img-src blob:` plus `media-src blob:` (the poster
 and idle video are shown from verified in-memory copies). Workers and audio worklets ship as files, so scripts need no
 `data:` or `blob:` source.

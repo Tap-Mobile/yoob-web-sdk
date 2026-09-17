@@ -12,7 +12,8 @@ import { YoobMicrophone } from "./microphone";
 export { YoobError, type CharacterManifest };
 export { YoobMicrophone, type MicrophoneOption, type MicrophoneState, type MicrophoneEvents } from "./microphone";
 export {
-  YoobConversation, type YoobConversationOptions, type ConversationState, type TurnDetection,
+  YoobConversation, voiceCloseError, type YoobConversationOptions, type YoobVoiceSession, type ConversationState,
+  type TurnDetection,
 } from "./conversation";
 export {
   YoobGeminiConversation, GEMINI_LIVE_URL, type YoobGeminiConversationOptions, type GeminiActivityDetection,
