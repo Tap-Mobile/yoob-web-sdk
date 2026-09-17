@@ -96,6 +96,11 @@ test("stops at once when the API refuses the session or the workspace is out of 
     [{ status: 403, body: {} }, "unauthorized"],
     [{ status: 402, body: { code: "quota_exceeded" } }, "out-of-credit"],
     [{ status: 200, body: { stop: true, reason: "out-of-credits" } }, "out-of-credit"],
+    [{ status: 200, body: { stop: true, reason: "out-of-credits", code: "monthly_cap_reached" } }, "out-of-credit"],
+    [{ status: 200, body: { stop: true, reason: "sandbox-limit", code: "sandbox_limit" } }, "session-ended"],
+    [{ status: 402, body: { stop: true, reason: "suspended", code: "suspended" } }, "session-ended"],
+    [{ status: 403, body: { stop: true, reason: "key-revoked", code: "key_revoked" } }, "unauthorized"],
+    [{ status: 402, body: "not json" }, "out-of-credit"],
   ];
   for (const [reply, code] of cases) {
     const h = harness([reply]);
@@ -132,14 +137,16 @@ test("opens a new session when the API has forgotten this one, and stops if that
 
 test("hands over a renewed download grant and tolerates its absence", async () => {
   const h = harness([
-    { status: 200, body: { stop: false, grant: "yg1.renewed", grant_expires_at: "2026-09-17T13:00:00Z" } },
-    { status: 200, body: { stop: false, grant: null } },
+    { status: 200, body: { stop: false, credits_remaining: 9, billed_seconds: 15, reason: null, download_token: "yg1.a", download_token_expires_at: 1790000000 } },
+    { status: 200, body: { stop: false, grant: "yg1.b", grant_expires_at: "2026-09-17T13:00:00Z" } },
+    { status: 200, body: { stop: false, download_token: "yg1.c", grant: "yg1.ignored" } },
+    { status: 200, body: { stop: false, download_token: null, grant: null } },
     { status: 200, body: { stop: false } },
     { status: 200, body: "not an object" },
   ]);
   h.monitor.start();
-  for (let i = 0; i < 4; i += 1) await h.drive(h.monitor.beatNow());
-  assert.deepEqual(h.grants, ["yg1.renewed"]);
+  for (let i = 0; i < 6; i += 1) await h.drive(h.monitor.beatNow());
+  assert.deepEqual(h.grants, ["yg1.a", "yg1.b", "yg1.c"]);
   assert.deepEqual(h.ended, []);
   h.monitor.stop();
 });

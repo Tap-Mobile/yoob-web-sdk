@@ -10,8 +10,11 @@ Security hardening. Needs the Yoob API that ships with it (heartbeats with renew
   or three heartbeats in a row fail (new error code `session-ended`). Transient failures are retried with backoff
   within those three attempts. A session Yoob no longer knows (404, or `stop` for another reason) is replaced through
   `getCredentials()`.
-- **Renewed download grants.** A heartbeat reply may carry `grant` (with `grant_expires_at`); the page and the render
-  worker use it for the next downloads. Replies without it work as before.
+- **Renewed download grants.** A heartbeat reply may carry `download_token` (with `download_token_expires_at`; the
+  names `grant` and `grant_expires_at` are also accepted); the page and the render worker use it for the next
+  downloads. Replies without it work as before.
+- **Terminal stop reasons.** `stop` with `sandbox-limit` or `suspended` ends the session (`session-ended`), and
+  `key-revoked` ends it as `unauthorized`, instead of opening a new session.
 - **Voice host pinning.** Yoob voice sessions connect only to `wss://*.yoob.com`. The new `voiceHosts` option allows
   a self-hosted relay.
 - **Credentials check.** `getCredentials()` must return a `session_token` and a `download_token`; anything else fails

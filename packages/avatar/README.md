@@ -64,7 +64,8 @@ The character fills its container (`fit: "contain"` letterboxes instead).
 
 If the session can't continue, the character stops rendering, the phase becomes `stopped`, and `onSessionEnded` and
 `onError` receive a `YoobError`: `out-of-credit` when the workspace has no credit left, `unauthorized` when Yoob
-refuses the session, or `session-ended` after three heartbeats in a row fail. `speak()` then throws the same error.
+refuses the session or its API key was revoked, or `session-ended` after three heartbeats in a row fail, when a
+sandbox session reaches its time limit, or when the workspace is suspended. `speak()` then throws the same error.
 Call `prepare()` to open a new session.
 
 ## Make it talk
@@ -333,8 +334,9 @@ minutes. With your own OpenAI account, it goes directly from the browser to Open
 - **Keys stay on your server.** A Yoob API key never belongs in a page, an app bundle or a repository. The API
   rejects key calls that come from a browser (any request with an `Origin`), so a key pasted into a page doesn't work.
   The page only ever holds a session token, a download grant and a voice token.
-- **Test keys for development.** A `yoob_test_` key opens sandbox sessions that don't use credits. Sandbox mode comes
-  from the key alone; there is no request flag to turn it on.
+- **Test keys for development.** A `yoob_test_` key opens sandbox sessions that don't use credits and are limited in
+  length (a few minutes each, with a daily total). Sandbox mode comes from the key alone; there is no request flag
+  to turn it on.
 - **Grants are short-lived and per character.** A download grant covers the characters its session was opened for and
   expires soon. Heartbeats may hand the SDK a renewed grant, which it uses from the next download on. A voice token
   opens one conversation and must be used within 5 minutes.

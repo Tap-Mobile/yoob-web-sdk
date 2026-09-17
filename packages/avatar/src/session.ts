@@ -4,11 +4,38 @@ import { SDK_VERSION, YoobError } from "./cdn";
 /** What `POST /api/v1/sessions/heartbeat` returns. Fields the SDK doesn't know are ignored. */
 export interface HeartbeatReply {
   stop?: boolean;
-  /** Why the session stopped: `out-of-credits`, `abandoned`, `ended`, or another value. */
+  /** Why the session stopped: `out-of-credits`, `sandbox-limit`, `suspended`, `key-revoked`, `abandoned`, `ended`. */
   reason?: string | null;
-  /** A renewed download grant, when the current one is close to expiring. */
+  /** Detail for some reasons, for example `monthly_cap_reached`. */
+  code?: string | null;
+  /** A renewed download grant, sent when the current one is close to expiring. */
+  download_token?: string | null;
+  download_token_expires_at?: string | number | null;
+  /** Older name for `download_token`, also accepted. */
   grant?: string | null;
   grant_expires_at?: string | number | null;
+}
+
+/** The renewed download grant in a heartbeat reply, if any. */
+export function renewedGrant(reply: HeartbeatReply): { token: string; expiresAt?: string | number } | undefined {
+  if (typeof reply.download_token === "string" && reply.download_token) {
+    return { token: reply.download_token, expiresAt: reply.download_token_expires_at ?? undefined };
+  }
+  if (typeof reply.grant === "string" && reply.grant) {
+    return { token: reply.grant, expiresAt: reply.grant_expires_at ?? undefined };
+  }
+  return undefined;
+}
+
+/** Why a stopped session can't simply be replaced, or undefined when a new session may be opened. */
+function terminalStop(reason: string | null | undefined): YoobError | undefined {
+  switch (reason) {
+    case "out-of-credits": return new YoobError("out-of-credit", "This Yoob workspace is out of credit.");
+    case "sandbox-limit": return new YoobError("session-ended", "This sandbox session reached its time limit.");
+    case "suspended": return new YoobError("session-ended", "This Yoob workspace is suspended.");
+    case "key-revoked": return new YoobError("unauthorized", "The API key that opened this session was revoked.");
+    default: return undefined;
+  }
 }
 
 export interface SessionMonitorOptions {
@@ -128,14 +155,12 @@ export class SessionMonitor {
   }
 
   private async handle(reply: HeartbeatReply): Promise<void> {
-    if (typeof reply.grant === "string" && reply.grant) {
-      this.options.onGrant(reply.grant, reply.grant_expires_at ?? undefined);
-    }
+    const grant = renewedGrant(reply);
+    if (grant) this.options.onGrant(grant.token, grant.expiresAt);
     if (!reply.stop) return;
-    if (reply.reason === "out-of-credits") {
-      return this.end(new YoobError("out-of-credit", "This Yoob workspace is out of credit."));
-    }
-    // The API ended the session for another reason (it was idle too long): open a new one through the backend.
+    const terminal = terminalStop(reply.reason);
+    if (terminal) return this.end(terminal);
+    // The API ended the session because it went quiet (a sleeping laptop): open a new one through the backend.
     return this.renew("The Yoob session ended and a new one couldn't be opened.");
   }
 
@@ -183,9 +208,14 @@ async function classify(response: Response): Promise<Outcome> {
   switch (response.status) {
     case 401:
     case 403:
-      return { kind: "fatal", error: new YoobError("unauthorized", "Yoob refused the session. Fetch a new one from your backend.") };
-    case 402:
-      return { kind: "fatal", error: new YoobError("out-of-credit", "This Yoob workspace is out of credit.") };
+    case 402: {
+      const body = await response.json().catch(() => ({})) as HeartbeatReply | null;
+      const terminal = terminalStop(body?.reason);
+      if (terminal) return { kind: "fatal", error: terminal };
+      return response.status === 402
+        ? { kind: "fatal", error: new YoobError("out-of-credit", "This Yoob workspace is out of credit.") }
+        : { kind: "fatal", error: new YoobError("unauthorized", "Yoob refused the session. Fetch a new one from your backend.") };
+    }
     case 404:
     case 410:
       return { kind: "gone" };
