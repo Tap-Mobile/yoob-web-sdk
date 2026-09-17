@@ -43,10 +43,12 @@ if (!support.supported) {
   (window as unknown as { yoob: YoobAvatar }).yoob = avatar;
 
   const conversation = new YoobConversation(avatar, {
-    // Your backend mints a short-lived OpenAI Realtime client secret.
-    getClientSecret: async () => (await post<{ value: string }>("/openai-secret", {})).value,
-    voice: "marin",
-    instructions: "You are Luna, a warm, curious companion. Keep replies short and natural.",
+    // Your backend asks Yoob for a voice session, and sets Luna's voice and prompt there.
+    // With your own OpenAI account instead (start the token server with OPENAI_API_KEY):
+    // getClientSecret: async () => (await post<{ value: string }>("/openai-secret", {})).value,
+    getVoiceSession: () => fetch("/yoob-voice", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ character: "luna-anime" }),
+    }).then((r) => r.json()),
     greet: true,
     onState: (state) => {
       talk.textContent = state === "idle" || state === "ended" ? "Talk to Luna" : "End";

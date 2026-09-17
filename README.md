@@ -4,9 +4,9 @@ Talking characters rendered in the browser. This repository holds:
 
 | Path | What |
 |---|---|
-| [`packages/avatar`](packages/avatar) | `@yoob/avatar`: the SDK, with rendering, microphone and OpenAI Realtime conversations |
+| [`packages/avatar`](packages/avatar) | `@yoob/avatar`: the SDK, with rendering, microphone, and conversations with Yoob voice, OpenAI Realtime, Gemini Live or LiveKit |
 | [`apps/demo`](apps/demo) | A one-page demo: talk to Luna, pick a microphone, mute, see captions |
-| [`examples/token-server`](examples/token-server) | The backend call that turns your Yoob API key into a browser session |
+| [`examples/token-server`](examples/token-server) | The backend calls that turn your Yoob API key into a browser session and a voice session |
 
 Start with the [package README](packages/avatar/README.md). For iOS, see
 [Yoob-com/yoob-ios-sdk](https://github.com/Yoob-com/yoob-ios-sdk).

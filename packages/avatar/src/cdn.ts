@@ -35,8 +35,12 @@ export interface CdnAccess {
 
 export class YoobError extends Error {
   constructor(
-    readonly code: "unauthorized" | "out-of-credit" | "network" | "invalid-assets" | "unsupported" | "invalid-audio" | "renderer",
+    readonly code:
+      | "unauthorized" | "out-of-credit" | "network" | "invalid-assets" | "unsupported" | "invalid-audio" | "renderer"
+      | "voice-session",
     message: string,
+    /** For `voice-session`: the Yoob voice relay's WebSocket close code and reason, for example 4009 `session_time_limit`. */
+    readonly details: { closeCode?: number; closeReason?: string } = {},
   ) {
     super(message);
     this.name = "YoobError";

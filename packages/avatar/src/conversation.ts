@@ -6,16 +6,46 @@ export type TurnDetection =
   | { type: "server_vad"; silenceMs?: number; threshold?: number; prefixPaddingMs?: number }
   | { type: "semantic_vad"; eagerness?: "low" | "medium" | "high" | "auto" };
 
+/**
+ * What `POST https://api2.yoob.com/api/v1/voice/sessions` returns to your backend. Pass the whole response to the page.
+ * The token opens one conversation and must be used within 5 minutes, so fetch a new one for every `start()`.
+ */
+export interface YoobVoiceSession {
+  voice_token: string;
+  /** The Yoob voice relay, for example `wss://voice.yoob.com/v1/realtime?model=gpt-realtime-2.1-mini`. */
+  url: string;
+  voice_session_id?: string;
+  model?: string;
+  max_seconds?: number;
+  credits_per_minute?: number;
+  expires_at?: string;
+}
+
 export interface YoobConversationOptions {
   /**
-   * Returns a short-lived OpenAI Realtime client secret from your backend
+   * Bundled voice: returns a Yoob voice session from your backend, which calls
+   * `POST https://api2.yoob.com/api/v1/voice/sessions` with your Yoob API key. No OpenAI key needed; minutes are billed
+   * to your Yoob workspace. Pass this or `getClientSecret`, not both.
+   */
+  getVoiceSession?: () => Promise<YoobVoiceSession>;
+  /**
+   * Your own OpenAI account: returns a short-lived OpenAI Realtime client secret from your backend
    * (`POST https://api.openai.com/v1/realtime/client_secrets`). Never put your OpenAI key in a page.
    */
-  getClientSecret: () => Promise<string>;
+  getClientSecret?: () => Promise<string>;
+  /** OpenAI model. With `getVoiceSession`, the session's `url` picks the model instead. */
   model?: string;
+  /**
+   * The character's voice. With `getVoiceSession`, a voice or instructions set on your backend take precedence and
+   * never reach the page; the ones set here are used only when the backend left them out.
+   */
   voice?: string;
   instructions?: string;
-  /** Spoken speed, 0.25–1.5. Default 1.08, which the Yoob demo measured as natural but snappy. */
+  /**
+   * Spoken speed, 0.25–1.5. Default 1.08, which the Yoob demo measured as natural but snappy.
+   * With `getVoiceSession`, Yoob sets speed, turn detection, noise reduction and transcription, and these options are
+   * ignored.
+   */
   speed?: number;
   /**
    * Default `server_vad` with a 450 ms silence window: replies start about 0.8 s sooner than `semantic_vad`, which
@@ -39,6 +69,36 @@ export interface YoobConversationOptions {
 export type ConversationState = "idle" | "connecting" | "listening" | "thinking" | "speaking" | "ended";
 
 const REALTIME_URL = "wss://api.openai.com/v1/realtime";
+const GRANT_PROTOCOL = "yoob-voice-grant.";
+
+/** What the Yoob voice relay's close codes mean to the person using the app. */
+export function voiceCloseError(code: number, reason = ""): YoobError {
+  const messages: Record<number, string> = {
+    1011: "The voice service disconnected. Start the conversation again.",
+    1013: "Voice is busy right now. Try again in a moment.",
+    4000: "The voice service refused this app's request. Update the app and try again.",
+    4001: "The voice session was refused. Start the conversation again.",
+    4002: "The voice session expired before it connected. Start the conversation again.",
+    4003: "This voice session was already used. Start the conversation again.",
+    4008: "This conversation reached its usage limit.",
+    4009: "This conversation reached its time limit.",
+    4010: "The conversation ended because it was idle for too long.",
+    4029: "Voice has reached its usage limit for now. Try again later.",
+  };
+  return new YoobError("voice-session", messages[code] ?? `The conversation disconnected (${code}).`, { closeCode: code, closeReason: reason });
+}
+
+/** Checks what the backend returned, and turns a passed-through Yoob API error into the matching `YoobError`. */
+function checkVoiceSession(session: unknown): YoobVoiceSession {
+  const value = (session ?? {}) as Partial<YoobVoiceSession> & { code?: string; error?: string };
+  if (typeof value.voice_token === "string" && value.voice_token && typeof value.url === "string") {
+    if (!/^wss:\/\//i.test(value.url)) throw new YoobError("voice-session", "The voice session URL must use wss://.");
+    return value as YoobVoiceSession;
+  }
+  if (value.code === "quota_exceeded") throw new YoobError("out-of-credit", "This Yoob workspace is out of voice credit.");
+  if (value.error || value.code) throw new YoobError("unauthorized", `Yoob didn't create a voice session: ${value.error ?? value.code}.`);
+  throw new YoobError("voice-session", "The backend didn't return a Yoob voice session.");
+}
 
 interface ServerEvent {
   type: string;
@@ -52,8 +112,10 @@ interface ServerEvent {
 }
 
 /**
- * A spoken conversation between the user and a Yoob character, using OpenAI Realtime.
- * Microphone audio goes from the browser to OpenAI; replies stream into the avatar, which plays them in sync.
+ * A spoken conversation between the user and a Yoob character, over the OpenAI Realtime protocol: either Yoob voice
+ * (`getVoiceSession`, no provider key, billed through your Yoob workspace) or your own OpenAI account
+ * (`getClientSecret`). Microphone audio goes from the browser to the voice service; replies stream into the avatar,
+ * which plays them in sync.
  * Speaking over the character interrupts it, and the model is told how much of its reply was heard.
  */
 export class YoobConversation {
@@ -66,8 +128,16 @@ export class YoobConversation {
   private userText = "";
   private assistantText = "";
   private closing = false;
+  private starting = false;
+  private closeFailure?: YoobError;
 
-  constructor(private readonly avatar: YoobAvatar, private readonly options: YoobConversationOptions) {}
+  constructor(private readonly avatar: YoobAvatar, private readonly options: YoobConversationOptions) {
+    if (!options.getVoiceSession === !options.getClientSecret) {
+      throw new YoobError("unsupported", "Pass either getVoiceSession (Yoob voice) or getClientSecret (your OpenAI account).");
+    }
+  }
+
+  private get bundled(): boolean { return Boolean(this.options.getVoiceSession); }
 
   get state(): ConversationState { return this.stateValue; }
 
@@ -75,19 +145,35 @@ export class YoobConversation {
   async start(options: { deviceId?: string | null } = {}): Promise<void> {
     if (this.socket) return;
     this.closing = false;
+    this.starting = true;
+    this.closeFailure = undefined;
     this.setState("connecting");
     try {
       await this.avatar.prepare();
       await this.avatar.unlockAudio();
-      const secret = await this.options.getClientSecret();
-      await this.open(secret);
-      this.configure();
+      if (this.options.getVoiceSession) {
+        // A voice session opens one connection and can't be refreshed, so it is fetched right before connecting.
+        const session = checkVoiceSession(await this.options.getVoiceSession());
+        await this.open(session.url, ["realtime", GRANT_PROTOCOL + session.voice_token], "Yoob voice");
+        this.configureVoice();
+      } else {
+        const secret = await this.options.getClientSecret!();
+        const model = encodeURIComponent(this.options.model ?? "gpt-realtime");
+        // Browsers can't set headers on WebSockets; OpenAI accepts an ephemeral secret as a subprotocol.
+        await this.open(`${REALTIME_URL}?model=${model}`, ["realtime", `openai-insecure-api-key.${secret}`], "OpenAI Realtime");
+        this.configure();
+      }
       const microphone = this.avatar.microphone;
       this.unsubscribe.push(microphone.on("audio", (pcm) => this.send({ type: "input_audio_buffer.append", audio: toBase64(pcm) })));
       await microphone.start(options);
+      if (this.closing) { this.starting = false; this.stop(); return; } // stop() was called while starting.
+      // The service may close the socket while the microphone permission prompt is open (an expired grant, a quota).
+      if (!this.socket) throw this.closeFailure ?? new YoobError("network", "The conversation disconnected.");
+      this.starting = false;
       this.setState("listening");
       if (this.options.greet) this.send({ type: "response.create" });
     } catch (error) {
+      this.starting = false;
       const failure = error instanceof YoobError ? error : new YoobError("network", errorText(error));
       this.stop();
       this.options.onError?.(failure);
@@ -120,24 +206,39 @@ export class YoobConversation {
     this.setState("ended");
   }
 
-  private open(secret: string): Promise<void> {
-    const model = encodeURIComponent(this.options.model ?? "gpt-realtime");
+  private open(url: string, protocols: string[], service: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      // Browsers can't set headers on WebSockets; OpenAI accepts an ephemeral secret as a subprotocol.
-      const socket = new WebSocket(`${REALTIME_URL}?model=${model}`, ["realtime", `openai-insecure-api-key.${secret}`]);
-      const timer = setTimeout(() => { socket.close(); reject(new YoobError("network", "OpenAI Realtime didn't answer in time.")); }, 15_000);
+      const socket = new WebSocket(url, protocols);
+      const timer = setTimeout(() => { socket.close(); reject(new YoobError("network", `${service} didn't answer in time.`)); }, 15_000);
       socket.onopen = () => { clearTimeout(timer); this.socket = socket; resolve(); };
-      socket.onerror = () => { clearTimeout(timer); reject(new YoobError("network", "Couldn't connect to OpenAI Realtime. Check the client secret.")); };
+      socket.onerror = () => {
+        clearTimeout(timer);
+        const hint = this.bundled ? "Check the network connection." : "Check the client secret.";
+        reject(new YoobError("network", `Couldn't connect to ${service}. ${hint}`));
+      };
       socket.onmessage = (event) => this.handle(String(event.data));
       socket.onclose = (event) => {
         if (this.socket !== socket) return;
         this.socket = undefined;
-        if (!this.closing) {
-          this.options.onError?.(new YoobError("network", `The conversation disconnected (${event.code}).`));
-          this.stop();
-        }
+        if (this.closing) return;
+        const failure = this.bundled
+          ? voiceCloseError(event.code, event.reason)
+          : new YoobError("network", `The conversation disconnected (${event.code}).`);
+        // During start(), start() reports the failure once.
+        if (this.starting) { this.closeFailure = failure; return; }
+        this.options.onError?.(failure);
+        this.stop();
       };
     });
+  }
+
+  /**
+   * Yoob voice configures the session itself. The relay accepts only instructions and voice from the page, and only
+   * when the backend didn't set them, so each goes in its own update: a refused one doesn't block the other.
+   */
+  private configureVoice(): void {
+    if (this.options.instructions) this.send({ type: "session.update", session: { instructions: this.options.instructions } });
+    if (this.options.voice) this.send({ type: "session.update", session: { audio: { output: { voice: this.options.voice } } } });
   }
 
   private configure(): void {
@@ -239,6 +340,8 @@ export class YoobConversation {
         const code = event.error?.code ?? event.error?.type ?? "server_error";
         // Cancelling a reply that just finished is a harmless race.
         if (code.includes("response_cancel") || code.includes("no_active_response")) return;
+        // Yoob voice: the backend already set the voice or instructions, and those win.
+        if (code === "yoob_voice_locked" || code === "yoob_instructions_locked") return;
         this.options.onError?.(new YoobError("network", event.error?.message ?? code));
         return;
       }
