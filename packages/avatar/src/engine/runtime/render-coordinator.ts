@@ -878,6 +878,11 @@ export class RenderCoordinator {
     return Math.floor(this.playedSamples * 1000 / 24_000);
   }
 
+  /** Hands the render worker a renewed download grant. */
+  updateDownloadToken(downloadToken: string): void {
+    this.post({ type: "grant", downloadToken });
+  }
+
   destroy(): void {
     cancelAnimationFrame(this.animation);
     this.animationRunning = false;

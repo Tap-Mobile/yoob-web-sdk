@@ -30,6 +30,7 @@ export interface WebRuntimeSettings {
 
 export interface CdnAccess {
   cdnBase: string;
+  /** Read before every request, so a grant renewed by a heartbeat is used from the next request on. */
   downloadToken: string;
 }
 
@@ -37,7 +38,7 @@ export class YoobError extends Error {
   constructor(
     readonly code:
       | "unauthorized" | "out-of-credit" | "network" | "invalid-assets" | "unsupported" | "invalid-audio" | "renderer"
-      | "voice-session",
+      | "voice-session" | "session-ended",
     message: string,
     /** For `voice-session`: the Yoob voice relay's WebSocket close code and reason, for example 4009 `session_time_limit`. */
     readonly details: { closeCode?: number; closeReason?: string } = {},
@@ -47,7 +48,7 @@ export class YoobError extends Error {
   }
 }
 
-export const SDK_VERSION = "0.1.1";
+export const SDK_VERSION = "0.2.0";
 
 /** Public keys whose manifest signatures the SDK accepts, by key id. */
 const SIGNING_KEYS: Record<string, string> = {
@@ -102,13 +103,13 @@ export function validateManifest(manifest: CharacterManifest): void {
   if (!seen.has(manifest.poster)) fail("missing poster");
 }
 
-async function request(url: string, token: string, signal?: AbortSignal): Promise<Response> {
+async function request(url: string, access: CdnAccess, signal?: AbortSignal): Promise<Response> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 400 << attempt));
     try {
       const response = await fetch(url, {
-        headers: { authorization: `Bearer ${token}`, "x-yoob-sdk": `yoob-web/${SDK_VERSION}` },
+        headers: { authorization: `Bearer ${access.downloadToken}`, "x-yoob-sdk": `yoob-web/${SDK_VERSION}` },
         cache: "no-store",
         credentials: "omit",
         mode: "cors",
@@ -135,7 +136,7 @@ export async function fetchManifest(
 ): Promise<CharacterManifest> {
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(character)) throw new YoobError("unsupported", `Invalid character id "${character}".`);
   const name = `${version ?? "latest"}${platform === "web" ? ".web" : ""}.json`;
-  const response = await request(`${trim(access.cdnBase)}/v1/characters/${character}/${name}`, access.downloadToken);
+  const response = await request(`${trim(access.cdnBase)}/v1/characters/${character}/${name}`, access);
   const envelope = await response.json() as { keyId: string; payload: string; signature: string };
   const raw = SIGNING_KEYS[envelope.keyId];
   if (!raw) throw new YoobError("invalid-assets", `Unknown manifest signing key ${envelope.keyId}.`);
@@ -219,7 +220,7 @@ export class ChunkStore {
       }
       await cache?.delete(url).catch(() => undefined);
     }
-    const response = await request(url, this.access.downloadToken);
+    const response = await request(url, this.access);
     const data = await response.arrayBuffer();
     if (data.byteLength !== chunk.size || await sha256Hex(data) !== chunk.sha256) {
       throw new YoobError("invalid-assets", `Chunk ${chunk.sha256.slice(0, 12)} failed verification.`);

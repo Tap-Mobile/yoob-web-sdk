@@ -46,7 +46,9 @@ export type MainToWorker =
       bootstrap?: boolean;
       pcm16le24k: ArrayBuffer;
     }
-  | { type: "cancel"; epoch: number };
+  | { type: "cancel"; epoch: number }
+  /** A download grant renewed by a session heartbeat. Later downloads use it. */
+  | { type: "grant"; downloadToken: string };
 
 export type WorkerToMain =
   | {

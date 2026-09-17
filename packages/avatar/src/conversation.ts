@@ -29,6 +29,12 @@ export interface YoobConversationOptions {
    */
   getVoiceSession?: () => Promise<YoobVoiceSession>;
   /**
+   * Hosts a Yoob voice session may connect to. Default `["*.yoob.com"]`: a session URL anywhere else is refused, so a
+   * compromised or misconfigured backend can't send microphone audio elsewhere. Override only to self-host the relay,
+   * for example `["voice.example.com"]`. `*.` matches any subdomain. Only `wss://` URLs are accepted.
+   */
+  voiceHosts?: string[];
+  /**
    * Your own OpenAI account: returns a short-lived OpenAI Realtime client secret from your backend
    * (`POST https://api.openai.com/v1/realtime/client_secrets`). Never put your OpenAI key in a page.
    */
@@ -88,11 +94,33 @@ export function voiceCloseError(code: number, reason = ""): YoobError {
   return new YoobError("voice-session", messages[code] ?? `The conversation disconnected (${code}).`, { closeCode: code, closeReason: reason });
 }
 
+export const DEFAULT_VOICE_HOSTS: readonly string[] = ["*.yoob.com"];
+
+/** Whether `url` is a `wss://` URL on one of `hosts` (exact names, or `*.domain` for any subdomain of it). */
+export function isAllowedVoiceUrl(url: string, hosts: readonly string[] = DEFAULT_VOICE_HOSTS): boolean {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== "wss:" || parsed.username || parsed.password) return false;
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  return hosts.some((entry) => {
+    const pattern = entry.trim().toLowerCase();
+    if (pattern.startsWith("*.")) {
+      const domain = pattern.slice(2);
+      return domain.length > 0 && host.endsWith(`.${domain}`);
+    }
+    return pattern.length > 0 && host === pattern;
+  });
+}
+
 /** Checks what the backend returned, and turns a passed-through Yoob API error into the matching `YoobError`. */
-function checkVoiceSession(session: unknown): YoobVoiceSession {
+export function checkVoiceSession(session: unknown, hosts: readonly string[] = DEFAULT_VOICE_HOSTS): YoobVoiceSession {
   const value = (session ?? {}) as Partial<YoobVoiceSession> & { code?: string; error?: string };
   if (typeof value.voice_token === "string" && value.voice_token && typeof value.url === "string") {
     if (!/^wss:\/\//i.test(value.url)) throw new YoobError("voice-session", "The voice session URL must use wss://.");
+    if (!isAllowedVoiceUrl(value.url, hosts)) {
+      throw new YoobError("voice-session",
+        "The voice session URL isn't on an allowed host. Yoob voice runs on *.yoob.com; set voiceHosts to self-host.");
+    }
     return value as YoobVoiceSession;
   }
   if (value.code === "quota_exceeded") throw new YoobError("out-of-credit", "This Yoob workspace is out of voice credit.");
@@ -153,7 +181,7 @@ export class YoobConversation {
       await this.avatar.unlockAudio();
       if (this.options.getVoiceSession) {
         // A voice session opens one connection and can't be refreshed, so it is fetched right before connecting.
-        const session = checkVoiceSession(await this.options.getVoiceSession());
+        const session = checkVoiceSession(await this.options.getVoiceSession(), this.options.voiceHosts ?? DEFAULT_VOICE_HOSTS);
         await this.open(session.url, ["realtime", GRANT_PROTOCOL + session.voice_token], "Yoob voice");
         this.configureVoice();
       } else {

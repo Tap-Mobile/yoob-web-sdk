@@ -21,17 +21,25 @@ npm install @yoob/avatar
 
 ## Open a session on your backend
 
-Keep your Yoob API key on the server and hand the page a short-lived session:
+Keep your Yoob API key on the server and hand the page a short-lived session. Check who is asking first: every
+session is metered to your workspace.
 
 ```js
 // POST /yoob-session on your server
+const user = await requireSignedInUser(req);            // your auth
+await rateLimit(user.id);                               // your limits
+const character = ALLOWED.has(req.body.character) ? req.body.character : reject(400);
 const response = await fetch("https://api2.yoob.com/api/v1/avatar/sessions", {
   method: "POST",
   headers: { authorization: `Bearer ${process.env.YOOB_API_KEY}`, "content-type": "application/json" },
-  body: JSON.stringify({ characters: ["luna-anime"] }),
+  body: JSON.stringify({ characters: [character] }), // one character, never "*"
 });
-return response.json(); // { session_token, download_token, heartbeat_seconds }
+return response.json(); // { session_token, download_token, heartbeat_seconds, ... }
 ```
+
+[`examples/token-server`](../../examples/token-server/server.mjs) is a runnable version. It refuses every request
+until you replace its `requireUser()` with your own sign-in check; `YOOB_EXAMPLE_ALLOW_ANONYMOUS=1` (which
+`npm run token-server` sets) turns that off for local development only. See [Security](#security).
 
 ## Show a character
 
@@ -47,11 +55,17 @@ const avatar = new YoobAvatar({
   getCredentials: () => fetch("/yoob-session", { method: "POST" }).then((r) => r.json()),
   onProgress: ({ fraction }) => (bar.value = fraction),
   onPhase: (phase) => console.log(phase), // downloading → warming → ready ⇄ speaking
+  onSessionEnded: (error) => showMessage(error.message), // out of credit, refused, or heartbeats failing
 });
 await avatar.prepare();
 ```
 
 The character fills its container (`fit: "contain"` letterboxes instead).
+
+If the session can't continue, the character stops rendering, the phase becomes `stopped`, and `onSessionEnded` and
+`onError` receive a `YoobError`: `out-of-credit` when the workspace has no credit left, `unauthorized` when Yoob
+refuses the session, or `session-ended` after three heartbeats in a row fail. `speak()` then throws the same error.
+Call `prepare()` to open a new session.
 
 ## Make it talk
 
@@ -96,11 +110,12 @@ const response = await fetch("https://api2.yoob.com/api/v1/voice/sessions", {
   method: "POST",
   headers: { authorization: `Bearer ${process.env.YOOB_API_KEY}`, "content-type": "application/json" },
   body: JSON.stringify({
-    voice: "marin",                                         // optional
-    instructions: "You are Luna, a warm, curious companion.", // optional, up to 8,000 characters
+    voice: "marin",
+    instructions: "You are Luna, a warm, curious companion.", // up to 8,000 characters
     max_seconds: 900,                                       // optional, default 1800
   }),
 });
+// Build the body yourself. Don't pass the page's request through.
 res.status(response.status).json(await response.json());
 // 201 { voice_session_id, voice_token, url, model, max_seconds, credits_per_minute, expires_at }
 ```
@@ -108,8 +123,10 @@ res.status(response.status).json(await response.json());
 - **One session per conversation.** A voice session opens exactly one connection, and its token must be used within 5
   minutes. `start()` calls `getVoiceSession` every time, so don't cache the response.
 - **Voice and instructions.** Set them on your backend: the page can't change them, and the prompt never reaches the
-  browser. `voice` is one of `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin` or
+  browser. Always send them; otherwise the page decides what the voice says on your bill. `voice` is one of `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin` or
   `cedar`. If the backend leaves them out, the conversation's `voice` and `instructions` options are used instead.
+- **Voice host.** The SDK connects only to `wss://*.yoob.com` and refuses any other session `url`. To run your own
+  relay, list its host: `voiceHosts: ["voice.example.com"]` (`*.example.com` matches subdomains).
 - **Fixed settings.** Yoob sets the model, turn detection, noise reduction, transcription and speed, so those options
   are ignored.
 - **Errors.** When the workspace is out of credit, the API answers `402 { "code": "quota_exceeded" }`, and `start()`
@@ -303,13 +320,36 @@ Using your own voice stack? Call `mic.start()` and read `mic.on("audio", pcm => 
 |---|---|---|
 | `cdn.yoob.com` character files | First visit and version updates | Download grant |
 | `cdn.yoob.com` ONNX Runtime WebAssembly | First visit | Nothing |
-| `api2.yoob.com/api/v1/sessions/heartbeat` | Every 15 s while prepared | Session token |
+| `api2.yoob.com/api/v1/sessions/heartbeat` | Every 15 s from the start of `prepare()` | Session token |
 | `api2.yoob.com/api/v1/sessions/end` | `destroy()` or page close | Session token |
 | `wss://voice.yoob.com/v1/realtime` | Yoob voice conversations | Voice token, microphone audio, typed text |
 
 With Yoob voice, microphone audio goes from the browser to `voice.yoob.com`, which relays it to OpenAI and meters the
 minutes. With your own OpenAI account, it goes directly from the browser to OpenAI, and with
 `YoobGeminiConversation` directly to Google. With `YoobLiveKitSession`, it goes to your LiveKit server, and the agent's audio comes back from it.
+
+## Security
+
+- **Keys stay on your server.** A Yoob API key never belongs in a page, an app bundle or a repository. The API
+  rejects key calls that come from a browser (any request with an `Origin`), so a key pasted into a page doesn't work.
+  The page only ever holds a session token, a download grant and a voice token.
+- **Test keys for development.** A `yoob_test_` key opens sandbox sessions that don't use credits. Sandbox mode comes
+  from the key alone; there is no request flag to turn it on.
+- **Grants are short-lived and per character.** A download grant covers the characters its session was opened for and
+  expires soon. Heartbeats may hand the SDK a renewed grant, which it uses from the next download on. A voice token
+  opens one conversation and must be used within 5 minutes.
+- **Heartbeats are enforced.** Heartbeats start with the session. If Yoob refuses the session (401 or 403), the
+  workspace is out of credit (402), or three heartbeats in a row fail, the character stops rendering and
+  `onSessionEnded` fires. Transient failures are retried with backoff within those three attempts. When Yoob ends an
+  idle session (a laptop that slept), the SDK asks `getCredentials()` for a new one.
+- **Voice only goes to Yoob.** Yoob voice sessions connect only to `wss://*.yoob.com` unless you set `voiceHosts`.
+- **What your token server must do.** The example server does each of these; keep them when you write your own:
+  1. Authenticate the user before minting anything, and fail closed.
+  2. Rate-limit sessions per user.
+  3. Accept only the character ids you offer, and send exactly that one character. Never `"*"`.
+  4. Always set the voice and instructions for voice sessions on the server.
+  5. Build the request body yourself. Don't pass fields from the page through to Yoob.
+  6. Keep the key in the server's environment, and return Yoob's response without logging tokens.
 
 ## Content Security Policy
 

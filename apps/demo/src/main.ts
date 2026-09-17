@@ -14,7 +14,11 @@ const assistantCaption = $<HTMLParagraphElement>("#assistant-caption");
 
 async function post<T>(path: string, body: object): Promise<T> {
   const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (!response.ok) throw new Error(`${path} failed (${response.status})`);
+  if (!response.ok) {
+    // The token server explains refusals, for example that it needs YOOB_EXAMPLE_ALLOW_ANONYMOUS=1 locally.
+    const detail = await response.json().then((b: { error?: string }) => b.error).catch(() => undefined);
+    throw new Error(detail ?? `${path} failed (${response.status})`);
+  }
   return response.json() as Promise<T>;
 }
 

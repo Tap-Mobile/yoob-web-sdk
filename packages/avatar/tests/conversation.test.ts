@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { YoobConversation, voiceCloseError, type YoobVoiceSession } from "../src/conversation";
+import { YoobConversation, isAllowedVoiceUrl, voiceCloseError, type YoobVoiceSession } from "../src/conversation";
 import { YoobError } from "../src/cdn";
 import type { YoobAvatar } from "../src/index";
 
@@ -261,4 +261,37 @@ test("needs exactly one way to connect", () => {
   const { avatar } = fakeAvatar();
   assert.throws(() => new YoobConversation(avatar, {}), YoobError);
   assert.throws(() => new YoobConversation(avatar, { getVoiceSession: voiceSession(), getClientSecret: async () => "ek" }), YoobError);
+});
+
+test("connects Yoob voice only to *.yoob.com unless voiceHosts says otherwise", async () => {
+  for (const url of [
+    "wss://evil.example.com/v1/realtime", "wss://yoob.com.evil.com/v1/realtime", "wss://evilyoob.com/v1/realtime",
+    "wss://user:pw@voice.yoob.com/v1/realtime", "not a url",
+  ]) {
+    const { avatar } = fakeAvatar();
+    const before = FakeSocket.last;
+    const convo = new YoobConversation(avatar, { getVoiceSession: async () => ({ voice_token: "t", url }) });
+    await assert.rejects(convo.start(), (error: YoobError) => error.code === "voice-session" && /allowed host|wss/.test(error.message), url);
+    assert.equal(FakeSocket.last, before, url);
+  }
+  const { avatar } = fakeAvatar();
+  const selfHosted = "wss://voice.example.com/v1/realtime";
+  const convo = new YoobConversation(avatar, {
+    getVoiceSession: async () => ({ voice_token: "t", url: selfHosted }), voiceHosts: ["voice.example.com"],
+  });
+  await convo.start();
+  assert.equal(FakeSocket.last?.url, selfHosted);
+  convo.stop();
+});
+
+test("matches voice hosts exactly or by subdomain", () => {
+  assert.ok(isAllowedVoiceUrl("wss://voice.yoob.com/v1/realtime?model=x"));
+  assert.ok(isAllowedVoiceUrl("wss://VOICE.Yoob.com./v1/realtime"));
+  assert.ok(isAllowedVoiceUrl("wss://eu.voice.yoob.com/v1/realtime"));
+  assert.ok(!isAllowedVoiceUrl("wss://yoob.com/v1/realtime"));
+  assert.ok(!isAllowedVoiceUrl("ws://voice.yoob.com/v1/realtime"));
+  assert.ok(!isAllowedVoiceUrl("wss://voice.yoob.com.attacker.io/"));
+  assert.ok(isAllowedVoiceUrl("wss://relay.example.com/", ["*.example.com"]));
+  assert.ok(!isAllowedVoiceUrl("wss://relay.example.com/", ["example.com"]));
+  assert.ok(!isAllowedVoiceUrl("wss://relay.example.com/", ["*."]));
 });
