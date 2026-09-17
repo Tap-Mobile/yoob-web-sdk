@@ -237,7 +237,7 @@ export class ConversationAudio {
   async tapRemoteTrack(
     track: RemoteAudioTrack,
     onPcm: (pcm: Int16Array) => void,
-  ): Promise<void> {
+  ): Promise<() => void> {
     await this.initialize();
     this.stopRemoteTap();
     const context = this.context!;
@@ -272,13 +272,15 @@ export class ConversationAudio {
     try {
       await Promise.all([context.resume(), element.play()]);
     } catch (error) {
-      cleanup();
-      this.remoteTapCleanup = undefined;
+      if (this.remoteTapCleanup === cleanup) this.stopRemoteTap();
       throw error;
     }
+    return cleanup;
   }
 
-  stopRemoteTap(): void {
+  /** Stops the remote tap, or only `cleanup`'s tap when given and still current. */
+  stopRemoteTap(cleanup?: () => void): void {
+    if (cleanup && this.remoteTapCleanup !== cleanup) return;
     this.remoteTapCleanup?.();
     this.remoteTapCleanup = undefined;
   }
