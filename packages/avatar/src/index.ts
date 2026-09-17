@@ -14,6 +14,10 @@ export { YoobMicrophone, type MicrophoneOption, type MicrophoneState, type Micro
 export {
   YoobConversation, type YoobConversationOptions, type ConversationState, type TurnDetection,
 } from "./conversation";
+export {
+  YoobGeminiConversation, GEMINI_LIVE_URL, type YoobGeminiConversationOptions, type GeminiActivityDetection,
+} from "./gemini-conversation";
+export { PcmResampler } from "./resampler";
 export const version = SDK_VERSION;
 
 /**

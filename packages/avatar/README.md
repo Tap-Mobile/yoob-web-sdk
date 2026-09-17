@@ -1,8 +1,8 @@
 # @yoob/avatar
 
 Talking characters rendered in the browser with WebGPU. You give Yoob speech; it plays the audio and moves the face in
-sync, on the visitor's own GPU. Add a microphone and OpenAI Realtime, and you have a live spoken conversation with
-barge-in.
+sync, on the visitor's own GPU. Add a microphone and OpenAI Realtime or Gemini Live, and you have a live spoken
+conversation with barge-in.
 
 - **Light.** About 20 KB gzipped to start. Rendering workers load when a character is created, and character files
   (37 MB) stream from `cdn.yoob.com` in verified chunks cached in the browser. On a good connection the character
@@ -98,6 +98,70 @@ come from latency measurements on the Yoob demo:
 The microphone stays open while the character speaks, so the user can interrupt; the browser's echo canceller removes
 the character's voice. In a noisy room, raise `turnDetection.threshold` rather than muting.
 
+## Talk with it: Gemini Live
+
+Bring your own Gemini voice with `YoobGeminiConversation`. It has the same states, transcripts and barge-in as
+`YoobConversation`.
+
+```ts
+import { YoobGeminiConversation } from "@yoob/avatar";
+
+const conversation = new YoobGeminiConversation(avatar, {
+  getToken: () => fetch("/gemini-token", { method: "POST" }).then((r) => r.json()).then((t) => t.name),
+  voice: "Kore",
+  systemInstruction: "You are Luna, a warm, curious companion.",
+  greet: true,
+  onUserTranscript: (text) => (userCaption.textContent = text),
+  onAssistantTranscript: (text) => (lunaCaption.textContent = text),
+  onState: (state) => console.log(state),
+});
+
+talkButton.onclick = () => conversation.start();   // asks for the microphone
+endButton.onclick = () => conversation.stop();
+```
+
+The page never sees your Gemini API key. Your backend creates a single-use
+[ephemeral token](https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens) and returns its `name`:
+
+```js
+// POST /gemini-token on your server
+import { GoogleGenAI } from "@google/genai";
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const token = await ai.authTokens.create({
+  config: {
+    uses: 1,
+    expireTime: new Date(Date.now() + 30 * 60_000).toISOString(),    // messages stop after this
+    newSessionExpireTime: new Date(Date.now() + 60_000).toISOString(), // the page must connect before this
+    liveConnectConstraints: { model: "gemini-3.8-live" },              // optional: lock the model
+  },
+});
+return { name: token.name };
+```
+
+Without the SDK, call `POST https://generativelanguage.googleapis.com/v1beta/auth_tokens` with the
+`x-goog-api-key` header and a body of `{ "uses": 1, "expireTime": "…", "newSessionExpireTime": "…" }`. Settings
+locked with `liveConnectConstraints` take precedence over the ones the page sends; Google's
+[`lockAdditionalFields`](https://googleapis.github.io/python-genai/genai.html#genai.types.CreateAuthTokenConfig.lock_additional_fields)
+controls which. Lock at least the model, so a leaked token can't be used for anything else.
+
+The conversation connects to Gemini's `BidiGenerateContentConstrained` WebSocket with the token. It converts the
+microphone's 24 kHz audio to the 16 kHz Gemini expects, and plays Gemini's 24 kHz replies through the avatar.
+
+| Option | Default | Why |
+|---|---|---|
+| `model` | `gemini-3.8-live` | Google's recommended low-latency native-audio Live model |
+| `voice` | Gemini's choice | Any prebuilt voice name, for example `Kore` or `Puck` |
+| `activityDetection.startSensitivity` | `"high"` | Quick barge-in. Use `"low"` in noisy rooms. |
+| `activityDetection.endSensitivity` | `"high"` | Ends the user's turn sooner |
+| `activityDetection.silenceDurationMs` | `450` | The silence window Yoob measured as fastest with OpenAI |
+| `activityDetection.prefixPaddingMs` | `100` | Short enough for one-word answers |
+| `inputTranscription` / `outputTranscription` | `true` | Captions for both sides |
+
+`sendText(text)` sends a typed turn. `onGoAway(timeLeft)` tells you when Gemini is about to close the connection:
+audio-only sessions last up to 15 minutes. Gemini doesn't report when a user turn ends, so a spoken turn goes from
+`listening` straight to `speaking`. `thinking` appears after `greet` and `sendText`.
+
 ## LiveKit agents
 
 `@yoob/avatar/livekit` shows a [LiveKit](https://docs.livekit.io/agents/) voice agent as a Yoob character. The agent's
@@ -184,15 +248,16 @@ Using your own voice stack? Call `mic.start()` and read `mic.on("audio", pcm => 
 | `api2.yoob.com/api/v1/sessions/heartbeat` | Every 15 s while prepared | Session token |
 | `api2.yoob.com/api/v1/sessions/end` | `destroy()` or page close | Session token |
 
-With `YoobConversation`, microphone audio goes directly from the browser to OpenAI. With `YoobLiveKitSession`, it goes
-to your LiveKit server, and the agent's audio comes back from it.
+With `YoobConversation`, microphone audio goes directly from the browser to OpenAI, and with `YoobGeminiConversation`
+directly to Google. With `YoobLiveKitSession`, it goes to your LiveKit server, and the agent's audio comes back from it.
 
 ## Content Security Policy
 
-Allow `connect-src https://cdn.yoob.com https://api2.yoob.com` (plus `wss://api.openai.com` for conversations, or your
-LiveKit server for LiveKit agents), `script-src 'self' 'wasm-unsafe-eval'`, `worker-src 'self'`, and `img-src blob:` plus
-`media-src blob:` (the poster and idle video are shown from verified in-memory copies). Workers and audio worklets ship
-as files, so scripts need no `data:` or `blob:` source.
+Allow `connect-src https://cdn.yoob.com https://api2.yoob.com` (plus `wss://api.openai.com` or
+`wss://generativelanguage.googleapis.com` for conversations, or your LiveKit server for LiveKit agents),
+`script-src 'self' 'wasm-unsafe-eval'`, `worker-src 'self'`, and `img-src blob:` plus `media-src blob:` (the poster
+and idle video are shown from verified in-memory copies). Workers and audio worklets ship as files, so scripts need no
+`data:` or `blob:` source.
 
 ## License
 

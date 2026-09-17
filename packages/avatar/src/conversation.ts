@@ -271,20 +271,20 @@ export class YoobConversation {
   }
 }
 
-function toBase64(pcm: Int16Array): string {
+export function toBase64(pcm: Int16Array): string {
   const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
   let binary = "";
   for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(binary);
 }
 
-function fromBase64(text: string): Int16Array {
+export function fromBase64(text: string): Int16Array {
   const binary = atob(text);
   const bytes = new Uint8Array(binary.length & ~1);
   for (let i = 0; i < bytes.length; i += 1) bytes[i] = binary.charCodeAt(i);
   return new Int16Array(bytes.buffer);
 }
 
-function errorText(error: unknown): string {
+export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
