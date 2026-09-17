@@ -124,7 +124,7 @@ Using your own voice stack? Call `mic.start()` and read `mic.on("audio", pcm => 
 |---|---|---|
 | `luna-anime` | Anime | 37 MB |
 
-`luna-realistic` is available in the [iOS SDK](https://github.com/Tap-Mobile/yoob-ios). Its web renderer is on the way.
+`luna-realistic` is available in the [iOS SDK](https://github.com/Tap-Mobile/yoob-ios-sdk). Its web renderer is on the way.
 
 ## Network
 

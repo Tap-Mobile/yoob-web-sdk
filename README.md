@@ -9,7 +9,7 @@ Talking characters rendered in the browser. This repository holds:
 | [`examples/token-server`](examples/token-server) | The backend call that turns your Yoob API key into a browser session |
 
 Start with the [package README](packages/avatar/README.md). For iOS, see
-[Tap-Mobile/yoob-ios](https://github.com/Tap-Mobile/yoob-ios).
+[Tap-Mobile/yoob-ios-sdk](https://github.com/Tap-Mobile/yoob-ios-sdk).
 
 ## Develop
 
