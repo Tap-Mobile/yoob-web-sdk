@@ -24,7 +24,7 @@ Keep your Yoob API key on the server and hand the page a short-lived session:
 
 ```js
 // POST /yoob-session on your server
-const response = await fetch("https://api.yoob.com/api/v1/avatar/sessions", {
+const response = await fetch("https://api2.yoob.com/api/v1/avatar/sessions", {
   method: "POST",
   headers: { authorization: `Bearer ${process.env.YOOB_API_KEY}`, "content-type": "application/json" },
   body: JSON.stringify({ characters: ["luna-anime"] }),
@@ -181,18 +181,18 @@ Using your own voice stack? Call `mic.start()` and read `mic.on("audio", pcm => 
 |---|---|---|
 | `cdn.yoob.com` character files | First visit and version updates | Download grant |
 | `cdn.yoob.com` ONNX Runtime WebAssembly | First visit | Nothing |
-| `api.yoob.com/api/v1/sessions/heartbeat` | Every 15 s while prepared | Session token |
-| `api.yoob.com/api/v1/sessions/end` | `destroy()` or page close | Session token |
+| `api2.yoob.com/api/v1/sessions/heartbeat` | Every 15 s while prepared | Session token |
+| `api2.yoob.com/api/v1/sessions/end` | `destroy()` or page close | Session token |
 
 With `YoobConversation`, microphone audio goes directly from the browser to OpenAI. With `YoobLiveKitSession`, it goes
 to your LiveKit server, and the agent's audio comes back from it.
 
 ## Content Security Policy
 
-Allow `connect-src https://cdn.yoob.com https://api.yoob.com` (plus `wss://api.openai.com` for conversations, or your
-LiveKit server for LiveKit agents),
-`script-src 'self' 'wasm-unsafe-eval'`, and `worker-src 'self'`. Workers and audio worklets ship as files, so
-`data:` and `blob:` sources are not needed.
+Allow `connect-src https://cdn.yoob.com https://api2.yoob.com` (plus `wss://api.openai.com` for conversations, or your
+LiveKit server for LiveKit agents), `script-src 'self' 'wasm-unsafe-eval'`, `worker-src 'self'`, and `img-src blob:` plus
+`media-src blob:` (the poster and idle video are shown from verified in-memory copies). Workers and audio worklets ship
+as files, so scripts need no `data:` or `blob:` source.
 
 ## License
 
