@@ -1,0 +1,52 @@
+{
+  "name": "@yoob/avatar",
+  "version": "0.1.0",
+  "description": "Talking characters rendered in the browser with WebGPU. Speech in, face out.",
+  "license": "Apache-2.0",
+  "homepage": "https://yoob.com/docs/web/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tap-Mobile/yoob-web-sdk.git",
+    "directory": "packages/avatar"
+  },
+  "keywords": [
+    "avatar",
+    "talking-head",
+    "lip-sync",
+    "webgpu",
+    "realtime",
+    "conversational-ai"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "postinstall": "node scripts/pin-ort-gpu-buffers.mjs"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.14",
+    "@webgpu/types": "^0.1.66",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vite": "8.1.5"
+  }
+}

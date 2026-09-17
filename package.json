@@ -1,0 +1,13 @@
+{
+  "name": "yoob-web-sdk",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "build": "npm run build --workspace @yoob/avatar",
+    "test": "npm test --workspace @yoob/avatar",
+    "typecheck": "npm run typecheck --workspace @yoob/avatar",
+    "demo": "npm run dev --workspace yoob-demo"
+  },
+  "engines": { "node": ">=22" }
+}
