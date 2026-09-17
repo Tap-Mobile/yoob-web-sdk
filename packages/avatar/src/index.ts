@@ -2,6 +2,7 @@ import {
   ChunkStore, SDK_VERSION, YoobError, clearChunkCache, fetchManifest, pruneChunkCache,
   type CharacterManifest,
 } from "./cdn";
+import type { RemoteAudioTrack } from "./engine/audio/conversation-audio";
 import { RenderCoordinator } from "./engine/runtime/render-coordinator";
 import type { RendererSpatialContract } from "./engine/runtime/generated/runtime-tier-contract";
 import type { RendererTemporalContract } from "./engine/runtime/renderer-temporal";
@@ -18,6 +19,12 @@ export {
 } from "./gemini-conversation";
 export { PcmResampler } from "./resampler";
 export const version = SDK_VERSION;
+
+/**
+ * The methods of a LiveKit `RemoteAudioTrack` that `attachAudioTrack()` uses. Any livekit-client 2.x remote audio track
+ * fits; the core package does not depend on livekit-client.
+ */
+export type YoobAudioTrack = RemoteAudioTrack;
 
 /** What your backend returns from `POST /api/v1/avatar/sessions`. Never put your Yoob API key in a web page. */
 export interface YoobCredentials {
@@ -189,6 +196,18 @@ export class YoobAvatar {
     return heard;
   }
 
+  /**
+   * Listens to a LiveKit remote audio track instead of playing it: `onAudio` receives its sound as 24 kHz mono PCM16 in
+   * 20 ms packets (silence included), and the track's own output is muted. Pass the packets you want heard to
+   * `speak()`. Only one track is attached at a time. Resolves to a function that detaches the track.
+   * `YoobLiveKitSession` from `@yoob/avatar/livekit` does all of this for a LiveKit agent.
+   */
+  async attachAudioTrack(track: YoobAudioTrack, onAudio: (pcm: Int16Array) => void): Promise<() => void> {
+    const audio = this.engine().audio;
+    const cleanup = await audio.tapRemoteTrack(track, onAudio);
+    return () => audio.stopRemoteTap(cleanup);
+  }
+
   /** Ends the metered session and removes the character from the page. Downloaded files stay cached. */
   async destroy(): Promise<void> {
     if (this.destroyed) return;
@@ -333,7 +352,7 @@ export class YoobAvatar {
   };
 
   private get apiBase(): string {
-    return (this.credentials?.api_base ?? "https://api.yoob.com").replace(/\/+$/, "");
+    return (this.credentials?.api_base ?? "https://api2.yoob.com").replace(/\/+$/, "");
   }
 
   private async beat(): Promise<void> {

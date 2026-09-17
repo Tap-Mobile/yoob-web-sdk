@@ -15,7 +15,8 @@
     "lip-sync",
     "webgpu",
     "realtime",
-    "conversational-ai"
+    "conversational-ai",
+    "livekit"
   ],
   "type": "module",
   "sideEffects": false,
@@ -25,6 +26,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./livekit": {
+      "types": "./dist/livekit.d.ts",
+      "import": "./dist/livekit.js"
     }
   },
   "files": [
@@ -42,9 +47,18 @@
   "dependencies": {
     "onnxruntime-web": "1.27.0"
   },
+  "peerDependencies": {
+    "livekit-client": "^2.9.0"
+  },
+  "peerDependenciesMeta": {
+    "livekit-client": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "24.10.14",
     "@webgpu/types": "^0.1.66",
+    "livekit-client": "2.22.3",
     "tsx": "4.21.0",
     "typescript": "5.9.3",
     "vite": "8.1.5"
