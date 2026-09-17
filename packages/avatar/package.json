@@ -6,7 +6,7 @@
   "homepage": "https://yoob.com/docs/web/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Tap-Mobile/yoob-web-sdk.git",
+    "url": "git+https://github.com/Yoob-com/yoob-web-sdk.git",
     "directory": "packages/avatar"
   },
   "keywords": [
