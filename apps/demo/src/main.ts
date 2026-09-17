@@ -65,12 +65,21 @@ if (!support.supported) {
   const mic = avatar.microphone;
   const fillDevices = async () => {
     const current = select.value;
-    const devices = await mic.devices();
-    select.replaceChildren(new Option("System default", ""), ...devices.map((d) => new Option(d.label, d.deviceId)));
+    const [devices, granted] = await Promise.all([mic.devices(), mic.hasAccess()]);
+    const defaultLabel = granted ? "System default" : "System default (allow the microphone to choose)";
+    select.replaceChildren(new Option(defaultLabel, ""), ...devices.map((d) => new Option(d.label, d.deviceId)));
     select.value = devices.some((d) => d.deviceId === current) ? current : "";
   };
   void fillDevices();
   mic.on("devices", () => void fillDevices());
+  // Input names stay hidden until the microphone is allowed once: ask the first time the list is opened.
+  const unlockList = async () => {
+    if (await mic.hasAccess()) return;
+    const devices = await mic.requestAccess().catch(() => []);
+    if (devices.length) void fillDevices();
+  };
+  select.addEventListener("pointerdown", () => void unlockList());
+  select.addEventListener("keydown", () => void unlockList());
   mic.on("level", (level) => {
     meterBar.style.width = `${Math.round(level * 100)}%`;
     meter.setAttribute("aria-valuenow", String(Math.round(level * 100)));

@@ -56,6 +56,36 @@ export class YoobMicrophone {
     return enumerateMicrophones(navigator.mediaDevices);
   }
 
+  /**
+   * Asks for microphone permission without starting a capture, so `devices()` can return every input with its name.
+   * Browsers hide input names until the user has allowed the microphone once.
+   */
+  async requestAccess(): Promise<MicrophoneOption[]> {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw this.fail(new YoobError("unsupported", "This browser can't use a microphone here. Microphones need HTTPS."));
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      stream.getTracks().forEach((track) => track.stop());
+    } catch (error) {
+      throw this.fail(microphoneError(error));
+    }
+    const devices = await this.devices();
+    for (const listener of this.listeners.devices) listener(devices);
+    this.watchDevices();
+    return devices;
+  }
+
+  /** Whether input names are visible (permission was granted). */
+  async hasAccess(): Promise<boolean> {
+    try {
+      const status = await navigator.permissions?.query({ name: "microphone" as PermissionName });
+      if (status) return status.state === "granted";
+    } catch { /* Some browsers can't query microphone permission. */ }
+    const inputs = await navigator.mediaDevices?.enumerateDevices().catch(() => []) ?? [];
+    return inputs.some((device) => device.kind === "audioinput" && device.label !== "");
+  }
+
   /** Asks for permission if needed and starts capturing. Call from a click so audio can start too. */
   async start(options: { deviceId?: string | null } = {}): Promise<void> {
     if (!navigator.mediaDevices?.getUserMedia) {
