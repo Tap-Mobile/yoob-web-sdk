@@ -329,7 +329,7 @@ export class YoobAvatar {
   };
 
   private get apiBase(): string {
-    return (this.credentials?.api_base ?? "https://api.yoob.com").replace(/\/+$/, "");
+    return (this.credentials?.api_base ?? "https://api2.yoob.com").replace(/\/+$/, "");
   }
 
   private async beat(): Promise<void> {
