@@ -34,6 +34,7 @@
   },
   "files": [
     "dist",
+    "!dist/**/*.map",
     "README.md",
     "LICENSE",
     "NOTICE"
@@ -42,7 +43,8 @@
     "build": "vite build && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "postinstall": "node scripts/pin-ort-gpu-buffers.mjs"
+    "postinstall": "node scripts/pin-ort-gpu-buffers.mjs",
+    "prepublishOnly": "npm test && npm run build"
   },
   "dependencies": {
     "onnxruntime-web": "1.27.0"
@@ -62,5 +64,8 @@
     "tsx": "4.21.0",
     "typescript": "5.9.3",
     "vite": "8.1.5"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
