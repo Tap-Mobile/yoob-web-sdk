@@ -1,6 +1,6 @@
 {
   "name": "@yoob/avatar",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Talking characters rendered in the browser with WebGPU. Speech in, face out.",
   "license": "Apache-2.0",
   "homepage": "https://yoob.com/docs/web/",
@@ -43,11 +43,8 @@
     "build": "vite build && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "postinstall": "node scripts/pin-ort-gpu-buffers.mjs",
-    "prepublishOnly": "npm test && npm run build"
-  },
-  "dependencies": {
-    "onnxruntime-web": "1.27.0"
+    "prepublishOnly": "npm test && npm run build",
+    "prebuild": "node scripts/pin-ort-gpu-buffers.mjs"
   },
   "peerDependencies": {
     "livekit-client": "^2.9.0"
@@ -63,7 +60,8 @@
     "livekit-client": "2.22.3",
     "tsx": "4.21.0",
     "typescript": "5.9.3",
-    "vite": "8.1.5"
+    "vite": "8.1.5",
+    "onnxruntime-web": "1.27.0"
   },
   "publishConfig": {
     "access": "public"
