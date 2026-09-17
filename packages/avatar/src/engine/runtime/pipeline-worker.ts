@@ -922,6 +922,11 @@ scope.onmessage = (event: MessageEvent<MainToWorker>) => {
     queuedRenderTasks += 1;
   }
   const queueDepthAtEnqueue = queuedRenderTasks;
+  if (message.type === "grant") {
+    // The asset store reads the token from this object before every request.
+    if (runtimeConfig) runtimeConfig.downloadToken = message.downloadToken;
+    return;
+  }
   if (message.type === "cancel") {
     currentEpoch = message.epoch;
     audioGeometry?.cancel(message.epoch);

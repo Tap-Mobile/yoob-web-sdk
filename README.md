@@ -6,7 +6,7 @@ Talking characters rendered in the browser. This repository holds:
 |---|---|
 | [`packages/avatar`](packages/avatar) | `@yoob/avatar`: the SDK, with rendering, microphone, and conversations with Yoob voice, OpenAI Realtime, Gemini Live or LiveKit |
 | [`apps/demo`](apps/demo) | A one-page demo: talk to Luna, pick a microphone, mute, see captions |
-| [`examples/token-server`](examples/token-server) | The backend calls that turn your Yoob API key into a browser session and a voice session |
+| [`examples/token-server`](examples/token-server) | The backend calls that turn your Yoob API key into a browser session and a voice session. It refuses requests until you add your own auth |
 
 Start with the [package README](packages/avatar/README.md). For iOS, see
 [Yoob-com/yoob-ios-sdk](https://github.com/Yoob-com/yoob-ios-sdk).
@@ -17,8 +17,11 @@ Start with the [package README](packages/avatar/README.md). For iOS, see
 npm install
 npm run build
 npm test
-npm run demo        # http://localhost:5173 (expects a session endpoint on :3100)
+YOOB_API_KEY=yoob_test_… npm run token-server   # 127.0.0.1:3100, anonymous access for local development only
+npm run demo        # http://localhost:5173
 ```
+
+Security: see the [package README](packages/avatar/README.md#security).
 
 ## License
 

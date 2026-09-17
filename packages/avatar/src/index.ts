@@ -8,12 +8,13 @@ import type { RendererSpatialContract } from "./engine/runtime/generated/runtime
 import type { RendererTemporalContract } from "./engine/runtime/renderer-temporal";
 
 import { YoobMicrophone } from "./microphone";
+import { SessionMonitor, endSession } from "./session";
 
 export { YoobError, type CharacterManifest };
 export { YoobMicrophone, type MicrophoneOption, type MicrophoneState, type MicrophoneEvents } from "./microphone";
 export {
-  YoobConversation, voiceCloseError, type YoobConversationOptions, type YoobVoiceSession, type ConversationState,
-  type TurnDetection,
+  YoobConversation, voiceCloseError, isAllowedVoiceUrl, DEFAULT_VOICE_HOSTS, type YoobConversationOptions,
+  type YoobVoiceSession, type ConversationState, type TurnDetection,
 } from "./conversation";
 export {
   YoobGeminiConversation, GEMINI_LIVE_URL, type YoobGeminiConversationOptions, type GeminiActivityDetection,
@@ -30,6 +31,7 @@ export type YoobAudioTrack = RemoteAudioTrack;
 /** What your backend returns from `POST /api/v1/avatar/sessions`. Never put your Yoob API key in a web page. */
 export interface YoobCredentials {
   session_token: string;
+  /** Short-lived grant for this session's characters. Heartbeats may renew it. */
   download_token: string;
   heartbeat_seconds?: number;
   api_base?: string;
@@ -59,6 +61,12 @@ export interface YoobAvatarOptions {
   onPhase?: (phase: YoobPhase) => void;
   onProgress?: (progress: YoobProgress) => void;
   onError?: (error: YoobError) => void;
+  /**
+   * The session stopped and the character stopped rendering: the workspace ran out of credit (`out-of-credit`), Yoob
+   * refused the session (`unauthorized`), or heartbeats failed three times in a row (`session-ended`). `onError`
+   * receives the same error. Call `prepare()` to start a new session.
+   */
+  onSessionEnded?: (error: YoobError) => void;
 }
 
 export interface YoobSupport {
@@ -83,12 +91,15 @@ export class YoobAvatar {
   private credentials?: YoobCredentials;
   private manifestValue?: CharacterManifest;
   private preparing?: Promise<void>;
-  private heartbeat?: ReturnType<typeof setInterval>;
+  private monitor?: SessionMonitor;
+  private access?: { cdnBase: string; downloadToken: string };
   private objectUrls: string[] = [];
   private utterance = 0;
   private speaking = false;
   private ended = false;
   private destroyed = false;
+  private stoppedError?: YoobError;
+  private stopListeners: Array<(error: YoobError) => void> = [];
   private runtimeEvent?: (event: { loadedBytes?: number }) => void;
   /** The user's microphone: device choice, mute, level and audio packets. */
   readonly microphone = new YoobMicrophone(() => this.engine().audio);
@@ -151,7 +162,11 @@ export class YoobAvatar {
   prepare(): Promise<void> {
     if (this.phaseValue === "ready" || this.phaseValue === "speaking") return Promise.resolve();
     this.preparing ??= this.load().catch((error: unknown) => {
+      if (this.phaseValue === "stopped" && this.stoppedError) throw this.stoppedError; // already reported
       const failure = toYoobError(error);
+      // Don't leave a metered session running behind a failed start.
+      this.stopHeartbeat();
+      this.endCurrentSession();
       this.setPhase("failed");
       this.options.onError?.(failure);
       throw failure;
@@ -170,7 +185,7 @@ export class YoobAvatar {
    * Plays 24 kHz mono 16-bit PCM and moves the face with it. Call for each chunk as it streams in, then `endSpeech()`.
    */
   speak(pcm: Int16Array | ArrayBuffer, sampleRate = SAMPLE_RATE): void {
-    if (this.phaseValue === "stopped") throw new YoobError("out-of-credit", "The Yoob session has stopped.");
+    if (this.phaseValue === "stopped") throw this.stoppedError ?? new YoobError("session-ended", "The Yoob session has stopped.");
     if (sampleRate !== SAMPLE_RATE) {
       throw new YoobError("invalid-audio", "@yoob/avatar 0.1 accepts 24 kHz audio. Request 24 kHz PCM from your voice provider.");
     }
@@ -213,13 +228,15 @@ export class YoobAvatar {
   async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
+    const credentials = this.credentials;
     this.stopHeartbeat();
     this.microphone.stop();
     this.coordinator?.destroy();
     this.coordinator = undefined;
     for (const url of this.objectUrls) URL.revokeObjectURL(url);
     this.root.remove();
-    if (this.credentials) await this.session("end").catch(() => undefined);
+    this.credentials = undefined;
+    if (credentials) await endSession(this.apiBaseOf(credentials), credentials.session_token).catch(() => undefined);
     this.setPhase("not-prepared");
   }
 
@@ -243,6 +260,9 @@ export class YoobAvatar {
 
   private engine(): RenderCoordinator {
     if (this.destroyed) throw new YoobError("renderer", "This avatar was destroyed.");
+    if (this.phaseValue === "stopped") {
+      throw this.stoppedError ?? new YoobError("session-ended", "The Yoob session has stopped. Call prepare() to start a new one.");
+    }
     this.coordinator ??= new RenderCoordinator(this.canvas, this.video, {
       onFirstHostFrame: () => { this.canvas.style.opacity = "1"; },
       onPlaybackEnded: () => this.finishUtterance(),
@@ -255,9 +275,15 @@ export class YoobAvatar {
   private async load(): Promise<void> {
     const support = await YoobAvatar.isSupported();
     if (!support.supported) throw new YoobError("unsupported", support.reason ?? "WebGPU is required.");
+    this.stoppedError = undefined;
     this.setPhase("downloading");
-    this.credentials = await this.options.getCredentials();
+    this.stopHeartbeat();
+    this.endCurrentSession();
+    this.credentials = checkCredentials(await this.options.getCredentials());
     const access = { cdnBase: this.cdnBase, downloadToken: this.credentials.download_token };
+    this.access = access;
+    // Metering starts with the session, so heartbeats run during the download too.
+    this.startHeartbeat();
     const manifest = await fetchManifest(access, this.options.character, this.options.version, "web");
     this.manifestValue = manifest;
     this.root.setAttribute("aria-label", manifest.displayName);
@@ -294,18 +320,18 @@ export class YoobAvatar {
       this.options.onProgress?.({ completedBytes: done, totalBytes: total, fraction: total ? done / total : 0 });
     };
     this.runtimeEvent = statusSink;
-    await coordinator.initialize(
+    await this.unlessStopped(coordinator.initialize(
       { ...access, manifest, ortWasmUrl: `${this.cdnBase}/${ORT_WASM_PATH}` },
       runtime.neuralMouthStride ?? 1,
       runtime.rendererInputType ?? "float32",
       runtime.rendererPreferredLayout ?? "NCHW",
       runtime.rendererSpatialContract as RendererSpatialContract | undefined,
       runtime.rendererTemporalContract as RendererTemporalContract | undefined,
-    );
+    ));
     this.options.onProgress?.({ completedBytes: total, totalBytes: total, fraction: 1 });
     this.canvas.style.opacity = "1";
     void pruneChunkCache([manifest]).catch(() => undefined);
-    this.startHeartbeat();
+    if (!this.monitor?.active) throw this.stoppedError ?? new YoobError("session-ended", "The Yoob session has stopped.");
     this.setPhase("ready");
   }
 
@@ -327,64 +353,102 @@ export class YoobAvatar {
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
-    const seconds = Math.max(5, this.credentials?.heartbeat_seconds ?? 15);
-    this.heartbeat = setInterval(() => void this.beat(), seconds * 1000);
+    const monitor = new SessionMonitor({
+      apiBase: () => this.apiBase,
+      sessionToken: () => this.credentials?.session_token,
+      intervalSeconds: this.credentials?.heartbeat_seconds ?? 15,
+      renew: () => this.renewSession(),
+      onGrant: (grant) => this.useGrant(grant),
+      onEnded: (error) => this.sessionEnded(error),
+    });
+    this.monitor = monitor;
+    monitor.start();
     document.addEventListener("visibilitychange", this.onVisibility);
     addEventListener("pagehide", this.onPageHide);
   }
 
   private stopHeartbeat(): void {
-    if (this.heartbeat) clearInterval(this.heartbeat);
-    this.heartbeat = undefined;
+    this.monitor?.stop();
+    this.monitor = undefined;
     document.removeEventListener("visibilitychange", this.onVisibility);
     removeEventListener("pagehide", this.onPageHide);
   }
 
   private readonly onVisibility = () => {
-    if (document.visibilityState === "visible" && this.phaseValue !== "stopped") void this.beat();
+    if (document.visibilityState === "visible") void this.monitor?.beatNow();
   };
 
   private readonly onPageHide = () => {
     if (!this.credentials) return;
     // Best effort: keepalive lets the final beat outlive the page.
-    void fetch(`${this.apiBase}/api/v1/sessions/end`, {
-      method: "POST", keepalive: true, headers: { authorization: `Bearer ${this.credentials.session_token}` },
-    }).catch(() => undefined);
+    void endSession(this.apiBase, this.credentials.session_token, true).catch(() => undefined);
   };
 
   private get apiBase(): string {
-    return (this.credentials?.api_base ?? "https://api2.yoob.com").replace(/\/+$/, "");
+    return this.apiBaseOf(this.credentials);
   }
 
-  private async beat(): Promise<void> {
-    try {
-      const reply = await this.session("heartbeat");
-      if (!reply.stop) return;
-      if (reply.reason === "out-of-credits") {
-        this.interrupt();
-        this.stopHeartbeat();
-        this.setPhase("stopped");
-        this.options.onError?.(new YoobError("out-of-credit", "This Yoob workspace is out of credit."));
-      } else {
-        this.credentials = await this.options.getCredentials();
-      }
-    } catch (error) {
-      // The console ends sessions that stopped beating (a sleeping laptop): open a new one.
-      if (error instanceof YoobError && error.code === "unauthorized") {
-        this.credentials = await this.options.getCredentials().catch(() => this.credentials);
-      }
-    }
+  private apiBaseOf(credentials?: YoobCredentials): string {
+    return (credentials?.api_base ?? "https://api2.yoob.com").replace(/\/+$/, "");
   }
 
-  private async session(action: "heartbeat" | "end"): Promise<{ stop?: boolean; reason?: string | null }> {
-    const response = await fetch(`${this.apiBase}/api/v1/sessions/${action}`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${this.credentials?.session_token ?? ""}`, "x-yoob-sdk": `yoob-web/${SDK_VERSION}` },
+  /** The API ended the session (it was idle too long): open a new one through the app's backend. */
+  private async renewSession(): Promise<void> {
+    const next = checkCredentials(await this.options.getCredentials());
+    if (this.destroyed) return;
+    this.credentials = next;
+    this.useGrant(next.download_token);
+  }
+
+  private useGrant(grant: string): void {
+    if (this.credentials) this.credentials = { ...this.credentials, download_token: grant };
+    if (this.access) this.access.downloadToken = grant;
+    this.coordinator?.updateDownloadToken(grant);
+  }
+
+  /** Rejects as soon as the session ends, so a start in progress doesn't wait on a renderer that was shut down. */
+  private unlessStopped<T>(work: Promise<T>): Promise<T> {
+    let listener!: (error: YoobError) => void;
+    const stopped = new Promise<never>((_, reject) => { listener = reject; });
+    this.stopListeners.push(listener);
+    return Promise.race([work, stopped]).finally(() => {
+      this.stopListeners = this.stopListeners.filter((entry) => entry !== listener);
     });
-    if (response.status === 401 || response.status === 404) throw new YoobError("unauthorized", "Session ended.");
-    if (!response.ok) throw new YoobError("network", `Heartbeat failed (HTTP ${response.status}).`);
-    return response.json();
   }
+
+  /** Ends the current session on the API, best effort, and forgets it. */
+  private endCurrentSession(): void {
+    const credentials = this.credentials;
+    this.credentials = undefined;
+    if (credentials) void endSession(this.apiBaseOf(credentials), credentials.session_token).catch(() => undefined);
+  }
+
+  /** Heartbeats say the session is over: stop rendering and tell the app. */
+  private sessionEnded(error: YoobError): void {
+    if (this.destroyed) return;
+    this.stoppedError = error;
+    this.interrupt();
+    this.microphone.stop();
+    this.stopHeartbeat();
+    this.endCurrentSession();
+    this.coordinator?.destroy();
+    this.coordinator = undefined;
+    this.canvas.style.opacity = "0";
+    this.video.removeAttribute("src");
+    this.video.load();
+    this.setPhase("stopped");
+    for (const listener of this.stopListeners.splice(0)) listener(error);
+    this.options.onSessionEnded?.(error);
+    this.options.onError?.(error);
+  }
+}
+
+function checkCredentials(value: YoobCredentials): YoobCredentials {
+  if (!value || typeof value.session_token !== "string" || !value.session_token
+      || typeof value.download_token !== "string" || !value.download_token) {
+    throw new YoobError("unauthorized", "getCredentials() didn't return a Yoob session. Check your backend's /yoob-session response.");
+  }
+  return value;
 }
 
 function toYoobError(error: unknown): YoobError {
