@@ -140,8 +140,9 @@ With `YoobConversation`, microphone audio goes directly from the browser to Open
 ## Content Security Policy
 
 Allow `connect-src https://cdn.yoob.com https://api.yoob.com` (plus `wss://api.openai.com` for conversations),
-`script-src 'self' 'wasm-unsafe-eval'`, and `worker-src 'self'`. Workers and audio worklets ship as files, so
-`data:` and `blob:` sources are not needed.
+`script-src 'self' 'wasm-unsafe-eval'`, `worker-src 'self'`, and `img-src blob:` plus `media-src blob:` (the poster
+and idle video are shown from verified in-memory copies). Workers and audio worklets ship as files, so scripts need no
+`data:` or `blob:` source.
 
 ## License
 
