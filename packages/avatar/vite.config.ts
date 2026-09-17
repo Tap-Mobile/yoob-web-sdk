@@ -46,11 +46,15 @@ export default defineConfig({
     // Worklets must be real files: a data: URL breaks pages whose CSP has no data: script source.
     assetsInlineLimit: (file) => (/-worklet\.js$/.test(file) ? false : undefined),
     lib: {
-      entry: "src/index.ts",
+      // `@yoob/avatar/livekit` is its own file, so the core never carries LiveKit code.
+      entry: { index: "src/index.ts", livekit: "src/livekit.ts" },
       formats: ["es"],
-      fileName: "index",
+      fileName: (_format, name) => `${name}.js`,
     },
     rollupOptions: {
+      // livekit.ts imports the core as "./index.js": keep that import, so index.js stays the whole core (its worklet
+      // URLs are relative to it) and the LiveKit entry loads the same copy.
+      external: (id, importer) => /^livekit-client(\/|$)/.test(id) || (id === "./index.js" && /src[\\/]livekit\.ts$/.test(importer ?? "")),
       output: { assetFileNames: "assets/[name]-[hash][extname]", chunkFileNames: "chunks/[name]-[hash].js" },
     },
   },

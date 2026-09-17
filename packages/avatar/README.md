@@ -98,6 +98,55 @@ come from latency measurements on the Yoob demo:
 The microphone stays open while the character speaks, so the user can interrupt; the browser's echo canceller removes
 the character's voice. In a noisy room, raise `turnDetection.threshold` rather than muting.
 
+## LiveKit agents
+
+`@yoob/avatar/livekit` shows a [LiveKit](https://docs.livekit.io/agents/) voice agent as a Yoob character. The agent's
+audio track is decoded in the browser and drives the face on the visitor's GPU: there is no avatar worker in the room
+and no video track, so nothing extra runs on your servers and the call uses only audio bandwidth. The agent needs
+nothing special; any normal voice agent works.
+
+```sh
+npm install @yoob/avatar livekit-client
+```
+
+```ts
+import { Room } from "livekit-client";
+import { YoobLiveKitSession } from "@yoob/avatar/livekit";
+
+const room = new Room();
+const session = new YoobLiveKitSession(avatar, {
+  room,
+  onUserTranscript: (text) => (userCaption.textContent = text),
+  onAssistantTranscript: (text) => (lunaCaption.textContent = text),
+  onState: (state) => console.log(state), // connecting → listening → thinking → speaking
+});
+
+talkButton.onclick = async () => {
+  const sound = avatar.unlockAudio();     // while the click still allows sound
+  const { url, token } = await fetch("/livekit-token", { method: "POST" }).then((r) => r.json());
+  await room.connect(url, token);
+  await sound;
+  await session.start();                  // publishes the microphone
+};
+endButton.onclick = async () => {
+  await session.stop();
+  await room.disconnect();
+};
+```
+
+The session follows the first agent in the room (or `agentIdentity`). It splits the agent's speech into replies with
+the agent's `lk.agent.state` attribute, or with 600 ms of silence (`silenceMs`) when the agent does not publish one. If
+the agent stops speaking while the user is talking, the character stops at once. The microphone is published through
+LiveKit with echo cancellation; pass `microphone: { deviceId }` to pick an input, or `microphone: false` to publish it
+yourself. Captions come from the agent's `lk.transcription` text streams.
+
+The avatar plays the agent's voice, so don't also attach that track yourself (for example with `RoomAudioRenderer`),
+or it will be heard twice. `livekit-client` 2.9 or newer is required only for this entry point; the main package does
+not include it.
+
+To handle a track yourself, `avatar.attachAudioTrack(track, (pcm) => avatar.speak(pcm))` mutes a LiveKit
+`RemoteAudioTrack` and hands you its sound as 24 kHz PCM. Call `endSpeech()` when a reply ends.
+
 ## Microphone controls
 
 `avatar.microphone` handles input selection, mute and level:
@@ -135,14 +184,15 @@ Using your own voice stack? Call `mic.start()` and read `mic.on("audio", pcm => 
 | `api2.yoob.com/api/v1/sessions/heartbeat` | Every 15 s while prepared | Session token |
 | `api2.yoob.com/api/v1/sessions/end` | `destroy()` or page close | Session token |
 
-With `YoobConversation`, microphone audio goes directly from the browser to OpenAI.
+With `YoobConversation`, microphone audio goes directly from the browser to OpenAI. With `YoobLiveKitSession`, it goes
+to your LiveKit server, and the agent's audio comes back from it.
 
 ## Content Security Policy
 
-Allow `connect-src https://cdn.yoob.com https://api2.yoob.com` (plus `wss://api.openai.com` for conversations),
-`script-src 'self' 'wasm-unsafe-eval'`, `worker-src 'self'`, and `img-src blob:` plus `media-src blob:` (the poster
-and idle video are shown from verified in-memory copies). Workers and audio worklets ship as files, so scripts need no
-`data:` or `blob:` source.
+Allow `connect-src https://cdn.yoob.com https://api2.yoob.com` (plus `wss://api.openai.com` for conversations, or your
+LiveKit server for LiveKit agents), `script-src 'self' 'wasm-unsafe-eval'`, `worker-src 'self'`, and `img-src blob:` plus
+`media-src blob:` (the poster and idle video are shown from verified in-memory copies). Workers and audio worklets ship
+as files, so scripts need no `data:` or `blob:` source.
 
 ## License
 
