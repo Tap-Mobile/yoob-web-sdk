@@ -48,7 +48,7 @@ class HttpError extends Error {
 async function requireUser(req) {
   if (allowAnonymous) return `anonymous:${req.socket.remoteAddress ?? "local"}`;
   throw new HttpError(401,
-    "This example token server has no authentication. Implement your own auth in requireUser() (examples/token-server/server.mjs), "
+    "This example token server has no authentication. Implement your own auth in requireUser() in token-server/server.mjs, "
     + "or set YOOB_EXAMPLE_ALLOW_ANONYMOUS=1 for local development only.");
 }
 
