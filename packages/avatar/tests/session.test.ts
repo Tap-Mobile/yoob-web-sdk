@@ -4,16 +4,19 @@ import { SessionMonitor, type SessionMonitorOptions } from "../src/session";
 import { YoobError } from "../src/cdn";
 
 type Reply = { status: number; body?: unknown } | Error;
+type Script = Reply[] | ((now: number) => Reply);
 
 /** A heartbeat endpoint that answers from a script, and a clock that only moves when the test says so. */
-function harness(replies: Reply[], extra: Partial<SessionMonitorOptions> = {}) {
-  const requests: Array<{ url: string; auth: string }> = [];
+function harness(replies: Script, extra: Partial<SessionMonitorOptions> = {}) {
+  const requests: Array<{ url: string; auth: string; at: number }> = [];
   const sleeps: number[] = [];
-  const waiting: Array<() => void> = [];
+  const waiting: Array<{ ms: number; resolve: () => void }> = [];
   const ended: YoobError[] = [];
   const grants: string[] = [];
+  const events: string[] = [];
   let renewals = 0;
   let token = "st_1";
+  let clock = 0;
   const monitor = new SessionMonitor({
     apiBase: () => "https://api2.yoob.com/",
     sessionToken: () => token,
@@ -21,31 +24,38 @@ function harness(replies: Reply[], extra: Partial<SessionMonitorOptions> = {}) {
     renew: async () => { renewals += 1; token = `st_${renewals + 1}`; },
     onGrant: (grant) => grants.push(grant),
     onEnded: (error) => ended.push(error),
+    onDegraded: (detail) => events.push(`degraded ${detail}`),
+    onRecovered: () => events.push("recovered"),
     retryDelayMs: (n) => n * 1000,
-    sleep: (ms) => { sleeps.push(ms); return new Promise((resolve) => waiting.push(resolve)); },
+    now: () => clock,
+    sleep: (ms) => { sleeps.push(ms); return new Promise((resolve) => waiting.push({ ms, resolve })); },
     fetch: (async (url: string, init: RequestInit) => {
-      requests.push({ url, auth: (init.headers as Record<string, string>).authorization });
-      const next = replies.shift() ?? { status: 200, body: { stop: false } };
+      requests.push({ url, auth: (init.headers as Record<string, string>).authorization, at: clock });
+      const next = typeof replies === "function" ? replies(clock) : replies.shift() ?? { status: 200, body: { stop: false } };
       if (next instanceof Error) throw next;
       return new Response(next.body === undefined ? null : JSON.stringify(next.body), { status: next.status });
     }) as typeof fetch,
     ...extra,
   });
-  /** Lets every pending sleep finish, then lets the resulting work settle. */
+  /** Lets every pending sleep finish (the clock moves by the longest), then lets the resulting work settle. */
   const tick = async () => {
-    for (const resolve of waiting.splice(0)) resolve();
+    const due = waiting.splice(0);
+    clock += Math.max(0, ...due.map((entry) => entry.ms));
+    for (const entry of due) entry.resolve();
     for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
   };
   /** Runs a beat to completion, moving the fake clock for any retry waits. */
   const drive = async (work: Promise<void>) => {
     let done = false;
     void work.finally(() => { done = true; });
-    for (let i = 0; i < 50 && !done; i += 1) await tick();
+    for (let i = 0; i < 500 && !done; i += 1) await tick();
     assert.ok(done, "the beat finished");
     await work;
   };
   return {
-    monitor, requests, sleeps, ended, grants, tick, drive,
+    monitor, requests, sleeps, ended, grants, events, tick, drive,
+    get clock() { return clock; },
+    advance: (ms: number) => { clock += ms; },
     get renewals() { return renewals; },
     setRenew: (fn: () => Promise<void>) => { (monitor as unknown as { options: SessionMonitorOptions }).options.renew = fn; },
   };
@@ -67,27 +77,125 @@ test("beats on the session's interval from the start, with the session token", a
   h.monitor.stop();
 });
 
-test("ends the session after three consecutive failed heartbeats, retrying with backoff", async () => {
-  const h = harness([new TypeError("offline"), { status: 503 }, { status: 409 }]);
+const MIN = 60_000;
+/** Backoff like the default one, without jitter: 2 s, 6 s, then every 15 s. */
+const backoff = (n: number) => (n <= 1 ? 2_000 : n === 2 ? 6_000 : 15_000);
+/** Fails until `until`, alternating 503s and network errors, then answers. */
+const outage = (until: number): ((now: number) => Reply) => {
+  let n = 0;
+  return (now) => (now >= until ? { status: 200, body: { stop: false } }
+    : (n += 1) % 2 ? { status: 503 } : new TypeError("offline"));
+};
+
+test("keeps running through 9 minutes of transient failures, then recovers", async () => {
+  const h = harness(outage(9 * MIN), { retryDelayMs: backoff });
   h.monitor.start();
   await h.drive(h.monitor.beatNow());
-  assert.equal(h.requests.length, 3);
-  assert.deepEqual(h.sleeps.slice(1), [1000, 2000], "backs off between retries");
+  assert.deepEqual(h.ended, []);
+  assert.equal(h.monitor.active, true);
+  assert.ok(h.requests.length > 30, `retried through the outage (${h.requests.length} beats)`);
+  assert.deepEqual(h.sleeps.slice(1, 5), [2_000, 6_000, 15_000, 15_000], "backs off, then retries every 15 s");
+  assert.ok(h.requests.at(-1)!.at >= 9 * MIN);
+  assert.deepEqual(h.events, ["degraded HTTP 503", "recovered"], "one degraded event, one recovery");
+  assert.equal(h.monitor.degraded, false);
+  assert.equal(h.monitor.consecutiveFailures, 0);
+
+  h.monitor.stop();
+});
+
+test("the grace window restarts after a recovery", async () => {
+  const first = outage(9 * MIN), second = outage(19 * MIN);
+  const h = harness((now) => (now < 10 * MIN ? first(now) : second(now)), { retryDelayMs: backoff });
+  h.monitor.start();
+  await h.drive(h.monitor.beatNow());
+  h.advance(10 * MIN - h.clock);
+  await h.drive(h.monitor.beatNow());
+  assert.deepEqual(h.ended, [], "two 9-minute outages with a success between them are both survived");
+  assert.deepEqual(h.events, ["degraded HTTP 503", "recovered", "degraded HTTP 503", "recovered"]);
+  h.monitor.stop();
+});
+
+test("stops as unreachable once transient failures outlast the 10-minute grace window", async () => {
+  const h = harness(() => ({ status: 502, body: "<html>Bad Gateway</html>" }), { retryDelayMs: backoff });
+  h.monitor.start();
+  await h.drive(h.monitor.beatNow());
   assert.equal(h.ended.length, 1);
   assert.equal(h.ended[0].code, "session-ended");
+  assert.equal(h.ended[0].details.reason, "unreachable");
+  assert.equal(h.monitor.active, false);
+  const last = h.requests.at(-1)!.at;
+  assert.ok(last >= 10 * MIN && last < 10 * MIN + 15_000, `the last attempt lands on the deadline (${last} ms)`);
+  assert.ok(h.requests.at(-2)!.at < 10 * MIN, "still retrying inside the window");
+  assert.deepEqual(h.events, ["degraded HTTP 502"]);
+  const beats = h.requests.length;
+  await h.drive(h.monitor.beatNow());
+  assert.equal(h.requests.length, beats, "no beats after the session ended");
+});
+
+test("408, 429, timeouts and unreadable replies are transient too", async () => {
+  const replies: Reply[] = [{ status: 408 }, { status: 429 }, new DOMException("aborted", "AbortError"),
+    { status: 200, body: undefined }, { status: 200, body: {} }];
+  // A 200 with an empty body is unreadable JSON: a proxy, not Yoob.
+  const h = harness(replies);
+  h.monitor.start();
+  await h.drive(h.monitor.beatNow());
+  assert.equal(h.requests.length, 5);
+  assert.deepEqual(h.ended, []);
+  assert.deepEqual(h.events, ["degraded HTTP 408", "recovered"]);
+  h.monitor.stop();
+
+  const proxy = harness([{ status: 200, body: undefined }], { outageGraceSeconds: 0 });
+  proxy.monitor.start();
+  await proxy.drive(proxy.monitor.beatNow());
+  assert.equal(proxy.ended[0]?.details.reason, "unreachable");
+});
+
+test("a 402 stops at once even while degraded", async () => {
+  const h = harness((now) => (now < 3 * MIN ? new TypeError("offline") : { status: 402, body: { code: "quota_exceeded" } }),
+    { retryDelayMs: backoff });
+  h.monitor.start();
+  await h.drive(h.monitor.beatNow());
+  assert.equal(h.ended.length, 1);
+  assert.equal(h.ended[0].code, "out-of-credit");
+  assert.ok(h.requests.at(-1)!.at < 4 * MIN, "did not wait for the grace window");
+  assert.deepEqual(h.events, ["degraded offline"]);
   assert.equal(h.monitor.active, false);
 });
 
-test("a successful heartbeat resets the failure count", async () => {
-  const h = harness([new TypeError("offline"), new TypeError("offline"), { status: 200, body: {} },
-    new TypeError("offline"), new TypeError("offline"), { status: 200, body: {} }]);
+test("the grace window is configurable from 0 (strict) to 1800 seconds", async () => {
+  const strict = harness(() => new TypeError("offline"), { outageGraceSeconds: 0 });
+  strict.monitor.start();
+  await strict.drive(strict.monitor.beatNow());
+  assert.equal(strict.requests.length, 1, "0 ends at the first failure");
+  assert.equal(strict.ended[0]?.details.reason, "unreachable");
+
+  const short = harness(outage(90_000), { outageGraceSeconds: 60, retryDelayMs: backoff });
+  short.monitor.start();
+  await short.drive(short.monitor.beatNow());
+  assert.equal(short.ended[0]?.details.reason, "unreachable");
+  assert.ok(short.requests.at(-1)!.at >= 60_000 && short.requests.at(-1)!.at < 90_000);
+
+  const capped = harness(() => ({ status: 500 }), { outageGraceSeconds: 99_999, retryDelayMs: backoff });
+  capped.monitor.start();
+  await capped.drive(capped.monitor.beatNow());
+  const last = capped.requests.at(-1)!.at;
+  assert.ok(last >= 30 * MIN && last < 30 * MIN + 15_000, `capped at 1800 s (${last} ms)`);
+
+  const negative = harness(() => ({ status: 500 }), { outageGraceSeconds: -5 });
+  negative.monitor.start();
+  await negative.drive(negative.monitor.beatNow());
+  assert.equal(negative.requests.length, 1, "negative values clamp to 0");
+});
+
+test("time the page wasn't beating (a sleeping laptop) doesn't count against the grace window", async () => {
+  const h = harness(outage(40 * MIN), { retryDelayMs: backoff });
   h.monitor.start();
+  h.advance(30 * MIN);
   await h.drive(h.monitor.beatNow());
-  assert.equal(h.monitor.consecutiveFailures, 0);
-  await h.drive(h.monitor.beatNow());
-  assert.equal(h.requests.length, 6);
-  assert.deepEqual(h.ended, []);
-  h.monitor.stop();
+  assert.deepEqual(h.events, ["degraded HTTP 503"]);
+  assert.equal(h.ended[0]?.details.reason, "unreachable");
+  const first = h.requests[0].at, last = h.requests.at(-1)!.at;
+  assert.ok(last - first >= 10 * MIN - 15_000, `retried for about 10 minutes after waking (${(last - first) / 1000} s)`);
 });
 
 test("stops at once when the API refuses the session or the workspace is out of credit", async () => {

@@ -55,7 +55,7 @@ const avatar = new YoobAvatar({
   getCredentials: () => fetch("/yoob-session", { method: "POST" }).then((r) => r.json()),
   onProgress: ({ fraction }) => (bar.value = fraction),
   onPhase: (phase) => console.log(phase), // downloading → warming → ready ⇄ speaking
-  onSessionEnded: (error) => showMessage(error.message), // out of credit, refused, or heartbeats failing
+  onSessionEnded: (error) => showMessage(error.message), // out of credit, refused, or Yoob unreachable for 10 min
 });
 await avatar.prepare();
 ```
@@ -64,9 +64,15 @@ The character fills its container (`fit: "contain"` letterboxes instead).
 
 If the session can't continue, the character stops rendering, the phase becomes `stopped`, and `onSessionEnded` and
 `onError` receive a `YoobError`: `out-of-credit` when the workspace has no credit left, `unauthorized` when Yoob
-refuses the session or its API key was revoked, or `session-ended` after three heartbeats in a row fail, when a
-sandbox session reaches its time limit, or when the workspace is suspended. `speak()` then throws the same error.
-Call `prepare()` to open a new session.
+refuses the session or its API key was revoked, or `session-ended` when a sandbox session reaches its time limit, when
+the workspace is suspended, or when Yoob can't be reached for the whole outage grace window (`error.details.reason` is
+`unreachable`). `speak()` then throws the same error. Call `prepare()` to open a new session.
+
+If heartbeats get no answer (network errors, timeouts, 408, 429, 5xx), the character keeps rendering while the SDK
+retries (after 2 s, 6 s, then every 15 s). `onHeartbeatDegraded(detail)` fires when that starts and
+`onHeartbeatRecovered()` when a heartbeat succeeds again. The character stops only once
+`heartbeatOutageGraceSeconds` (default 600, from 0 to 1800) have passed since the last successful heartbeat. Set it to
+0 to stop at the first failure.
 
 ## Make it talk
 
@@ -340,10 +346,15 @@ minutes. With your own OpenAI account, it goes directly from the browser to Open
 - **Grants are short-lived and per character.** A download grant covers the characters its session was opened for and
   expires soon. Heartbeats may hand the SDK a renewed grant, which it uses from the next download on. A voice token
   opens one conversation and must be used within 5 minutes.
-- **Heartbeats are enforced.** Heartbeats start with the session. If Yoob refuses the session (401 or 403), the
-  workspace is out of credit (402), or three heartbeats in a row fail, the character stops rendering and
-  `onSessionEnded` fires. Transient failures are retried with backoff within those three attempts. When Yoob ends an
-  idle session (a laptop that slept), the SDK asks `getCredentials()` for a new one.
+- **Heartbeats are enforced.** Heartbeats start with the session. Explicit denials stop the character at once: a
+  refused session (401 or 403), an exhausted workspace (402), or a `stop` reply for out of credit, a sandbox limit, a
+  suspended workspace or a revoked key. The character stops rendering and `onSessionEnded` fires.
+- **An outage doesn't stop characters.** If Yoob can't be reached (network errors, timeouts, 408, 429, 5xx), the
+  character keeps rendering for up to 10 minutes after the last successful heartbeat while the SDK retries, then
+  stops as `session-ended` with reason `unreachable`. `heartbeatOutageGraceSeconds` changes the window (0 to 1800).
+  The current download grant keeps being used meanwhile; if it expires during the outage, new downloads fail, but a
+  character that already loaded keeps rendering. When Yoob ends an idle session (a laptop that slept), the SDK asks
+  `getCredentials()` for a new one.
 - **Voice only goes to Yoob.** Yoob voice sessions connect only to `wss://*.yoob.com` unless you set `voiceHosts`.
 - **What your token server must do.** The example server does each of these; keep them when you write your own:
   1. Authenticate the user before minting anything, and fail closed.

@@ -53,12 +53,22 @@ export interface SessionMonitorOptions {
   onGrant: (grant: string, expiresAt?: string | number) => void;
   /** The session can't continue. Called once; the monitor has stopped. */
   onEnded: (error: YoobError) => void;
-  /** Consecutive failed heartbeats that end the session. Default 3. */
-  maxFailures?: number;
-  /** Waits before retrying a failed heartbeat, by failure count. Default 2 s, then 6 s, with jitter. */
+  /**
+   * How long the session keeps running while heartbeats can't get an answer (network errors, timeouts, 408, 429, 5xx,
+   * unreadable replies), counted from the last successful heartbeat. When it runs out the session ends as
+   * `session-ended` with reason `unreachable`. Clamped to 0 (end at the first failure) through 1800. Default 600.
+   */
+  outageGraceSeconds?: number;
+  /** Heartbeats started failing without an answer. The session keeps running while they are retried. */
+  onDegraded?: (detail: string) => void;
+  /** A heartbeat succeeded again after `onDegraded`. */
+  onRecovered?: () => void;
+  /** Waits before retrying a failed heartbeat, by failure count. Default 2 s, 6 s, then every 15 s, with jitter. */
   retryDelayMs?: (failures: number) => number;
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /** Milliseconds on a monotonic clock. Default `performance.now()`. */
+  now?: () => number;
   /** Milliseconds before a heartbeat request is abandoned and counted as failed. Default 10 s. */
   timeoutMs?: number;
 }
@@ -70,12 +80,25 @@ type Outcome =
   | { kind: "transient"; detail: string };
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-const defaultRetryDelay = (failures: number) => (failures <= 1 ? 2_000 : 6_000) * (0.8 + Math.random() * 0.4);
+const defaultRetryDelay = (failures: number) =>
+  (failures <= 1 ? 2_000 : failures === 2 ? 6_000 : 15_000) * (0.8 + Math.random() * 0.4);
+const defaultNow = () => (typeof performance === "undefined" ? Date.now() : performance.now());
+
+/** Default and bounds of `outageGraceSeconds`. */
+export const OUTAGE_GRACE_SECONDS = { default: 600, min: 0, max: 1800 } as const;
+
+export function clampOutageGrace(seconds: number | undefined): number {
+  if (seconds === undefined || Number.isNaN(seconds)) return OUTAGE_GRACE_SECONDS.default;
+  return Math.min(OUTAGE_GRACE_SECONDS.max, Math.max(OUTAGE_GRACE_SECONDS.min, seconds));
+}
 
 /**
- * Sends a heartbeat every `intervalSeconds` from the moment the session opens. Transient failures are retried with
- * backoff; `maxFailures` in a row, a refused session (401, 403) or an exhausted workspace (402, or `stop` with
- * `out-of-credits`) end the session through `onEnded`.
+ * Sends a heartbeat every `intervalSeconds` from the moment the session opens.
+ *
+ * A refused session (401, 403) or an exhausted workspace (402, or `stop` with a terminal reason) ends the session at
+ * once through `onEnded`, even while degraded. Failures without an answer (network, timeout, 408, 429, 5xx, unreadable
+ * reply) only degrade it: they are retried with backoff and the session keeps running until `outageGraceSeconds` have
+ * passed since the last successful heartbeat.
  */
 export class SessionMonitor {
   private running = false;
@@ -83,19 +106,27 @@ export class SessionMonitor {
   private failures = 0;
   private inFlight?: Promise<void>;
   private wake?: () => void;
-  private readonly maxFailures: number;
+  private lastOk = 0;
+  private degradedValue = false;
+  private readonly graceMs: number;
+  private readonly now: () => number;
 
   constructor(private readonly options: SessionMonitorOptions) {
-    this.maxFailures = Math.max(1, options.maxFailures ?? 3);
+    this.graceMs = clampOutageGrace(options.outageGraceSeconds) * 1000;
+    this.now = options.now ?? defaultNow;
   }
 
   get active(): boolean { return this.running; }
   get consecutiveFailures(): number { return this.failures; }
+  /** Heartbeats are failing without an answer and being retried. */
+  get degraded(): boolean { return this.degradedValue; }
 
   start(): void {
     if (this.running) return;
     this.running = true;
     this.failures = 0;
+    this.degradedValue = false;
+    this.lastOk = this.now();
     const generation = ++this.generation;
     void this.loop(generation);
   }
@@ -131,27 +162,45 @@ export class SessionMonitor {
   }
 
   private async beat(generation: number): Promise<void> {
+    const intervalMs = Math.max(5, this.options.intervalSeconds) * 1000;
+    // Time the page wasn't beating at all (a sleeping laptop, a frozen tab) isn't an outage: the grace window starts no
+    // earlier than one interval before this beat.
+    const anchor = Math.max(this.lastOk, this.now() - intervalMs);
     for (;;) {
       if (!this.running || generation !== this.generation) return;
       const outcome = await this.send();
       if (!this.running || generation !== this.generation) return;
       switch (outcome.kind) {
         case "ok":
-          this.failures = 0;
+          this.succeeded();
           return this.handle(outcome.reply);
         case "fatal":
           return this.end(outcome.error);
         case "gone":
           return this.renew("The Yoob session ended and a new one couldn't be opened.");
-        case "transient":
+        case "transient": {
           this.failures += 1;
-          if (this.failures >= this.maxFailures) {
+          const remaining = anchor + this.graceMs - this.now();
+          if (remaining <= 0) {
             return this.end(new YoobError("session-ended",
-              `The Yoob session could not be confirmed (${outcome.detail}), so the character stopped.`));
+              `Yoob couldn't be reached (${outcome.detail}), so the character stopped.`, { reason: "unreachable" }));
           }
-          await this.pause((this.options.retryDelayMs ?? defaultRetryDelay)(this.failures));
+          if (!this.degradedValue) {
+            this.degradedValue = true;
+            this.options.onDegraded?.(outcome.detail);
+          }
+          await this.pause(Math.min(remaining, (this.options.retryDelayMs ?? defaultRetryDelay)(this.failures)));
+        }
       }
     }
+  }
+
+  private succeeded(): void {
+    this.failures = 0;
+    this.lastOk = this.now();
+    if (!this.degradedValue) return;
+    this.degradedValue = false;
+    this.options.onRecovered?.();
   }
 
   private async handle(reply: HeartbeatReply): Promise<void> {
@@ -168,7 +217,7 @@ export class SessionMonitor {
     const generation = this.generation;
     try {
       await this.options.renew();
-      if (generation === this.generation) this.failures = 0;
+      if (generation === this.generation) this.succeeded();
     } catch (error) {
       if (generation !== this.generation) return;
       const cause = error instanceof YoobError && error.code === "out-of-credit" ? error : undefined;

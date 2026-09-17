@@ -63,10 +63,21 @@ export interface YoobAvatarOptions {
   onError?: (error: YoobError) => void;
   /**
    * The session stopped and the character stopped rendering: the workspace ran out of credit (`out-of-credit`), Yoob
-   * refused the session (`unauthorized`), or heartbeats failed three times in a row (`session-ended`). `onError`
-   * receives the same error. Call `prepare()` to start a new session.
+   * refused the session (`unauthorized`), or Yoob couldn't be reached for the whole outage grace window
+   * (`session-ended` with `details.reason` `unreachable`). `onError` receives the same error. Call `prepare()` to
+   * start a new session.
    */
   onSessionEnded?: (error: YoobError) => void;
+  /**
+   * How long the character keeps rendering while heartbeats get no answer (network errors, timeouts, 408, 429, 5xx),
+   * counted from the last successful heartbeat. 0 stops at the first failure; the most is 1800. Default 600 (10 min).
+   * Refusals (401, 402, 403) stop the character at once regardless.
+   */
+  heartbeatOutageGraceSeconds?: number;
+  /** Heartbeats started failing without an answer. Not fatal: the character keeps rendering while they are retried. */
+  onHeartbeatDegraded?: (detail: string) => void;
+  /** A heartbeat succeeded again after `onHeartbeatDegraded`. */
+  onHeartbeatRecovered?: () => void;
 }
 
 export interface YoobSupport {
@@ -360,6 +371,12 @@ export class YoobAvatar {
       renew: () => this.renewSession(),
       onGrant: (grant) => this.useGrant(grant),
       onEnded: (error) => this.sessionEnded(error),
+      outageGraceSeconds: this.options.heartbeatOutageGraceSeconds,
+      onDegraded: (detail) => {
+        if (this.options.onHeartbeatDegraded) this.options.onHeartbeatDegraded(detail);
+        else console.warn(`Yoob heartbeat failed (${detail}); retrying while the character keeps rendering.`);
+      },
+      onRecovered: () => this.options.onHeartbeatRecovered?.(),
     });
     this.monitor = monitor;
     monitor.start();
