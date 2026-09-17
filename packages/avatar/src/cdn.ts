@@ -40,8 +40,12 @@ export class YoobError extends Error {
       | "unauthorized" | "out-of-credit" | "network" | "invalid-assets" | "unsupported" | "invalid-audio" | "renderer"
       | "voice-session" | "session-ended",
     message: string,
-    /** For `voice-session`: the Yoob voice relay's WebSocket close code and reason, for example 4009 `session_time_limit`. */
-    readonly details: { closeCode?: number; closeReason?: string } = {},
+    /**
+     * For `voice-session`: the Yoob voice relay's WebSocket close code and reason, for example 4009
+     * `session_time_limit`. For `session-ended`: `reason` is `unreachable` when heartbeats failed for the whole outage
+     * grace window.
+     */
+    readonly details: { closeCode?: number; closeReason?: string; reason?: string } = {},
   ) {
     super(message);
     this.name = "YoobError";
